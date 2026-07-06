@@ -10,26 +10,153 @@ from utils import *
 warnings.filterwarnings("ignore")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def train_on_noise_model(noise_ckpt, seed=0, add_noise=True, n_epochs=None, eval_on_tst=True, init_eval=True,
-                         key='latest_noise', theta_lr=None, 
-                         shuffle_noisy_data=False, rnd_noise=False, 
-                         override_finetune=False, bs=128, tst_on_train=False, cil=False):
-    
+def get_task_heads(model: torch.nn.Module):
+    if isinstance(model, torch.nn.DataParallel):
+        return model.module.heads
+
+    return model.heads
+
+def train_on_noise_model(
+        noise_ckpt,
+        seed=0,
+        add_noise=True,
+        n_epochs=None,
+        eval_on_tst=True,
+        init_eval=True,
+        key="latest_noise",
+        theta_lr=None,
+        shuffle_noisy_data=False,
+        rnd_noise=False,
+        override_finetune=False,
+        bs=128,
+        tst_on_train=False,
+        cil=False,
+):
     torch.manual_seed(seed)
     np.random.seed(seed)
-    # bs = 32 
 
-    if 'pkl' in noise_ckpt:
-        pkl_file = open(f'{noise_ckpt}', 'rb')
-        noise_save_dict = pkl.load(pkl_file)
-        pkl_file.close()
+    if "pkl" in noise_ckpt:
+        with open(noise_ckpt, "rb") as file:
+            noise_save_dict = pkl.load(file)
     else:
         noise_save_dict = noise_ckpt
 
-    cont_method_args = noise_save_dict['pretrained_ckpt']['cont_method_args']
+    cont_method_args = (
+        noise_save_dict["pretrained_ckpt"]["cont_method_args"]
+    )
 
-    model = create_load_add_head(**noise_save_dict['pretrained_ckpt'], load=True)
-    ds_dict = get_dataset_specs(**noise_save_dict['pretrained_ckpt'])[0]
+    model = create_load_add_head(
+        **noise_save_dict["pretrained_ckpt"],
+        load=True,
+    )
+
+    artifact_version = int(
+        noise_save_dict.get("artifact_version", 0)
+    )
+
+    if artifact_version < 2:
+        raise RuntimeError(
+            "Legacy BrainWash artifact detected. "
+            "Regenerate the attack with artifact_version >= 2."
+        )
+
+    if key == "latest_noise":
+        head_state_key = "latest_noise_head_state"
+        head_index_key = "latest_noise_head_index"
+        head_epoch_key = "latest_noise_epoch"
+
+    elif key == "noise":
+        head_state_key = "best_noise_head_state"
+        head_index_key = "best_noise_head_index"
+        head_epoch_key = "best_noise_epoch"
+
+    else:
+        raise ValueError(
+            f"Unsupported noise key: {key}. "
+            "Expected 'latest_noise' or 'noise'."
+        )
+
+    required_keys = {
+        key,
+        head_state_key,
+        head_index_key,
+        head_epoch_key,
+    }
+
+    missing_keys = required_keys - set(noise_save_dict)
+
+    if missing_keys:
+        raise KeyError(
+            "The attack artifact is missing required noise/head data: "
+            f"{sorted(missing_keys)}"
+        )
+
+    task_heads = get_task_heads(model)
+
+    head_index = int(
+        noise_save_dict[head_index_key]
+    )
+
+    if head_index < 0 or head_index >= len(task_heads):
+        raise RuntimeError(
+            f"Saved head index {head_index} is invalid for a model "
+            f"with {len(task_heads)} task heads."
+        )
+
+    expected_head_index = len(task_heads) - 1
+
+    if head_index != expected_head_index:
+        raise RuntimeError(
+            f"Expected the incoming-task head at index "
+            f"{expected_head_index}, but the artifact stores "
+            f"index {head_index}."
+        )
+
+    selected_head_state = noise_save_dict[
+        head_state_key
+    ]
+
+    task_heads[head_index].load_state_dict(
+        selected_head_state,
+        strict=True,
+    )
+
+    restored_head_state = (
+        task_heads[head_index].state_dict()
+    )
+
+    for parameter_name, expected_tensor in selected_head_state.items():
+        actual_tensor = (
+            restored_head_state[parameter_name]
+            .detach()
+            .cpu()
+        )
+
+        expected_tensor = (
+            expected_tensor
+            .detach()
+            .cpu()
+        )
+
+        if not torch.equal(
+                actual_tensor,
+                expected_tensor,
+        ):
+            raise RuntimeError(
+                "Task-head restoration failed for parameter: "
+                f"{parameter_name}"
+            )
+
+    print(
+        "Exact attack-time task head restored:",
+        f"noise_key={key},",
+        f"head_index={head_index},",
+        f"noise_epoch={noise_save_dict[head_epoch_key]}",
+    )
+
+    ds_dict = get_dataset_specs(
+        **noise_save_dict["pretrained_ckpt"]
+    )[0]
     ds_tst = ds_dict['test'][-1]
                                                
     
