@@ -3,34 +3,14 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch 
 import numpy as np
 import pickle as pkl
-from data_utils import *
-from utils import *
+from data_utils import *    
+from utils import * 
 from train_utils import eval_dl, train_on_noise_model
 import warnings
 import pandas as pd
-import os
-from typing import Dict
 
 warnings.filterwarnings("ignore")
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-ARTIFACT_VERSION = 2
-
-
-def clone_state_dict_to_cpu(
-        module: torch.nn.Module,
-) -> Dict[str, torch.Tensor]:
-    return {
-        name: tensor.detach().cpu().clone()
-        for name, tensor in module.state_dict().items()
-    }
-
-
-def get_task_heads(model: torch.nn.Module):
-    if isinstance(model, torch.nn.DataParallel):
-        return model.module.heads
-
-    return model.heads
 
 def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                     distill_folder=None, extra_desc='', init_acc=False, noise_norm='inf', 
@@ -38,21 +18,6 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                     w_cur=1., eval_every=100,  save_every=100, n_epochs=5000,
                     n_iters=1, reset_head_every=1, real=False, output_dir=None,
                     reverse=False, grads_track_every=0, data_parallel=False):
-
-    if n_iters != 1:
-        raise ValueError(
-            "Artifact version 2 requires n_iters=1."
-        )
-
-    if reset_head_every != 1:
-        raise ValueError(
-            "Artifact version 2 requires reset_head_every=1."
-        )
-
-    track_gradients = (
-            grads_track_every > 0
-            and grads_track_every <= n_epochs
-    )
 
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
@@ -124,10 +89,7 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
     save_dict['reverse'] = reverse
     save_dict['real'] = real
 
-    save_dict['rnd_idx_train']  = rnd_idx_train
-
-    save_dict["artifact_version"] = ARTIFACT_VERSION
-    save_dict["reset_head_every"] = int(reset_head_every)
+    save_dict['rnd_idx_train']  = rnd_idx_train   
 
     if mode == 'cautious':
         save_dict['w_cur'] = w_cur  
@@ -149,7 +111,7 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
         y_dst = torch.from_numpy(data['y_dst'])
         all_x_dst.append(x_dst)
         all_y_dst.append(y_dst)
-        if track_gradients:
+        if grads_track_every <= n_epochs:
             dst_loader = DataLoader(TensorDataset(x_dst, y_dst), batch_size=bs, shuffle=False)
             grad_accum = None
             num_samples = 0
@@ -171,10 +133,10 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                 else:
                     grad_accum += g
                 num_samples += xb.size(0)
-        if track_gradients:
+        if grads_track_every <= n_epochs:
             avg_grad = grad_accum / num_samples
             inv_grads.append(avg_grad)
-    if track_gradients:
+    if grads_track_every <= n_epochs:
         inv_grad_matrix = torch.stack(inv_grads, dim=0).to(device)
         mat_save_path = 'inv_grad_matrix'
         if output_dir is None:
@@ -189,20 +151,13 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
         num_of_dl_iters = len(ds_train) //  bs + 1 
 
     for epoch in range(n_epochs):
-        all_noise_grads = torch.zeros_like(all_noise)
+        all_noise_grads = torch.zeros_like(all_noise)   
 
         if epoch % reset_head_every == 0:
-            model = create_load_add_head(**model_save_dict, load=True, data_parallel=data_parallel)
-
+            model = create_load_add_head(**model_save_dict, load=True, data_parallel=data_parallel)  
+            
             optim = create_optimizer(model, 'sgd', lr=theta_lr)
-
-        task_heads = get_task_heads(model)
-        head_index_for_current_noise = len(task_heads) - 1
-
-        head_state_for_current_noise = clone_state_dict_to_cpu(
-            task_heads[head_index_for_current_noise]
-        )
-
+        
         outer_loss_ = []
         
         cnted_iters = 0 
@@ -221,11 +176,7 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                     grad_theta = torch.autograd.grad(loss, model.parameters(), create_graph=True, allow_unused=True)    
 
                     # track gradients
-                    if track_gradients and (
-                            epoch == 0
-                            or (epoch + 1) % grads_track_every == 0
-                            or epoch == n_epochs - 1
-                    ):
+                    if (epoch == 0 or (epoch+1) % grads_track_every == 0 or epoch == (n_epochs-1)) and grads_track_every <= n_epochs:
                         grad_full = torch.cat([
                             g.view(-1)
                             for (name, _), g in zip(model.named_parameters(), grad_theta)
@@ -242,21 +193,9 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                             'grad_norm': grad_norm,
                             **{f'cos_sim_task{j}': cos_sims[j] for j in range(len(cos_sims))}
                         })
-
-                    source_model = (
-                        model.module
-                        if isinstance(model, torch.nn.DataParallel)
-                        else model
-                    )
-
-                    tmp_model = create_load_add_head(
-                        **model_save_dict,
-                        load=True,
-                        model_state_dict=source_model.state_dict(),
-                        data_parallel=data_parallel,
-                    )
-
-                    apply_psuedo_update(tmp_model, grad_theta, theta_lr, 'sgd', optim)
+                    
+                    tmp_model = create_load_add_head(**model_save_dict, load=True, model_state_dict=model.state_dict(), data_parallel=data_parallel)  
+                    apply_psuedo_update(tmp_model, grad_theta, theta_lr, 'sgd', optim) 
 
                     if mode == 'reckless':
                         loss_target = cal_loss_target_alltasks(tmp_model, loss_fn, all_x_dst, all_y_dst, reverse=reverse)
@@ -294,28 +233,9 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
                   delta * np.sqrt(all_noise_flatten.shape[1])
                        
             
-            all_noise = all_noise_flatten.reshape(all_noise.shape)
+            all_noise = all_noise_flatten.reshape(all_noise.shape)  
 
-        save_dict["latest_noise"] = (
-            all_noise.detach().cpu().clone()
-        )
-
-        save_dict["latest_noise_head_state"] = {
-            name: tensor.clone()
-            for name, tensor
-            in head_state_for_current_noise.items()
-        }
-
-        save_dict["latest_noise_head_index"] = int(
-            head_index_for_current_noise
-        )
-
-        save_dict["latest_noise_epoch"] = int(epoch)
-
-        save_dict["head_state_semantics"] = (
-            "Task head used to compute the outer gradient that "
-            "produced the stored latest_noise."
-        )
+        save_dict['latest_noise'] = all_noise   
     
         if (epoch+1) % eval_every == 0: 
             model_star = train_on_noise_model(save_dict, seed=seed, add_noise=True,
@@ -327,26 +247,8 @@ def brainwash(pretrained_model_add, target_task_for_eval, delta=0.3, seed=0,
             
             if (not reverse and acc_target < acc_target_best) or (reverse and acc_target > acc_target_best):
                 acc_target_best = acc_target
-                save_dict["noise"] = (
-                    all_noise.detach().cpu().clone()
-                )
-
-                save_dict["best_noise_head_state"] = {
-                    name: tensor.clone()
-                    for name, tensor
-                    in head_state_for_current_noise.items()
-                }
-
-                save_dict["best_noise_head_index"] = int(
-                    head_index_for_current_noise
-                )
-
-                save_dict["best_noise_epoch"] = int(epoch)
-
-                save_dict["best_acc_target"] = float(
-                    acc_target_best
-                )
-
+                save_dict['noise'] = all_noise 
+                save_dict['best_acc_target'] = str(acc_target_best).split('.')[0] 
                 print("Saving best noise")
             
             print(f'epoch {epoch} mean traj loss: {loss_target_mean} acc_curr: {acc_curr} acc_target: {acc_target} best_acc_target: {acc_target_best}')
