@@ -105,15 +105,19 @@ def matched_random_noise(delta, seed):
     permutation = torch.randperm(flat_abs.numel(), generator=generator)
 
     signs = torch.randint(low=0, high=2, size=(flat_abs.numel(),), generator=generator, dtype=torch.int64).float()
+
     signs = signs.mul(2.0).sub(1.0)
 
     random_flat = flat_abs[permutation] * signs
     random_delta = random_flat.reshape_as(delta)
 
-    if not torch.allclose(random_delta.norm(), delta.norm(), rtol=1e-6, atol=1e-6):
+    original_norm = torch.linalg.vector_norm(delta.double())
+    random_norm = torch.linalg.vector_norm(random_delta.double())
+
+    if not torch.isclose(original_norm, random_norm, rtol=1e-10, atol=1e-12):
         raise RuntimeError("Random control does not preserve the L2 norm.")
 
-    if not torch.allclose(random_delta.abs().max(), delta.abs().max(), rtol=1e-6, atol=1e-6):
+    if random_delta.abs().max() != delta.abs().max():
         raise RuntimeError("Random control does not preserve the L-infinity norm.")
 
     return random_delta
