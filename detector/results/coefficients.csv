@@ -1,0 +1,4 @@
+feature,standardized_coefficient
+loss,-1.7060142996612806
+grad_norm_l2,2.4930419552528584
+grad_cosine_past,-0.0425758670988348

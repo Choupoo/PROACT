@@ -1,0 +1,65 @@
+{
+  "classifier": "StandardScaler fit on train only, followed by L2 logistic regression.",
+  "classifier_seed": 20260723,
+  "feature_columns": [
+    "loss",
+    "grad_norm_l2",
+    "grad_cosine_past"
+  ],
+  "feature_protocol": "clean_supervised_baseline_v1",
+  "features_path": "/home/p.zhang/PROACT/runs/detector_seed0/features.csv",
+  "features_sha256": "07e3045bf8607e4c00d9f582e2284610c5a3bbb1a5d7669ba1c474a88b25d3fb",
+  "random_control_test": {
+    "mean_poison_probability": 0.5054519977010107,
+    "positive_rate_at_frozen_threshold": 0.16,
+    "samples": 500
+  },
+  "target_clean_fpr": 0.05,
+  "test": {
+    "average_precision": 0.8613676260829206,
+    "balanced_accuracy": 0.702,
+    "clean_fpr": 0.044,
+    "confusion_matrix": [
+      [
+        478,
+        22
+      ],
+      [
+        276,
+        224
+      ]
+    ],
+    "poison_tpr": 0.448,
+    "precision": 0.9105691056910569,
+    "recall": 0.448,
+    "roc_auc": 0.880064,
+    "threshold": 0.8150813941882312
+  },
+  "test_original_images": 500,
+  "test_used_for_threshold_selection": false,
+  "test_used_for_training": false,
+  "threshold": 0.8150813941882312,
+  "threshold_rule": "Higher empirical quantile of validation-clean scores at 1 - target_clean_fpr.",
+  "train_original_images": 3000,
+  "validation": {
+    "average_precision": 0.8578593593012069,
+    "balanced_accuracy": 0.698,
+    "clean_fpr": 0.05,
+    "confusion_matrix": [
+      [
+        475,
+        25
+      ],
+      [
+        277,
+        223
+      ]
+    ],
+    "poison_tpr": 0.446,
+    "precision": 0.8991935483870968,
+    "recall": 0.446,
+    "roc_auc": 0.8637959999999999,
+    "threshold": 0.8150813941882312
+  },
+  "validation_original_images": 500
+}
