@@ -11,7 +11,15 @@ from detector import (FEATURE_COLUMNS,
     FEATURE_PROTOCOL,
     HEAD_MODE,
 )
+import math
 
+STAGE_NAMES = (
+    "stem",
+    "layer1",
+    "layer2",
+    "layer3",
+    "layer4",
+)
 
 def flatten_gradients(gradients):
     return torch.cat(
@@ -34,6 +42,51 @@ def backbone_parameters(model):
 
     return named, [parameter for _, parameter in named]
 
+def normalize_parameter_name(name):
+    if name.startswith("module."):
+        name = name[len("module."):]
+    return name
+
+def parameter_to_stage(name):
+    name = normalize_parameter_name(name)
+    if name.startswith("conv1.") or name.startswith("bn1."):
+        return "stem"
+
+    if name.startswith("layer1."):
+        return "layer1"
+
+    if name.startswith("layer2."):
+        return "layer2"
+
+    if name.startswith("layer3."):
+        return "layer3"
+
+    if name.startswith("layer4."):
+        return "layer4"
+
+    raise RuntimeError(
+        "Unknown backbone parameter: {}".format(name)
+    )
+
+def compute_stage_gradient_norms(named_parameters, gradients,):
+    squared_sums = {
+        stage: 0.0
+        for stage in STAGE_NAMES
+    }
+
+    for (name, parameter), gradient in zip(named_parameters, gradients,):
+        if gradient is None:
+            continue
+
+        stage = parameter_to_stage(name)
+
+        squared_sums[stage] += float(gradient.detach().float().pow(2).sum().item())
+
+    return {
+        "grad_norm_stage_{}".format(stage):
+            math.sqrt(squared_sums[stage])
+        for stage in STAGE_NAMES
+    }
 
 def compute_past_gradient_direction(model, inversion_files, device, batch_size):
     _, parameters = backbone_parameters(model)
@@ -122,24 +175,46 @@ def matched_random_noise(delta, seed):
 
     return random_delta
 
-
-def extract_one(model, parameters, past_direction, image, target, device):
+def extract_one(model, named_parameters, parameters, past_direction, image, target, device,):
     image = image.unsqueeze(0).to(device)
+
     target = torch.tensor([int(target)], dtype=torch.long, device=device,)
 
     model.zero_grad(set_to_none=True)
 
     logits = model(image)[-1]
-    loss = F.cross_entropy(logits, target)
 
-    gradients = torch.autograd.grad(loss, parameters, retain_graph=False, create_graph=False, allow_unused=False)
+    loss = F.cross_entropy(logits, target,)
+
+    gradients = torch.autograd.grad(loss, parameters, retain_graph=False, create_graph=False, allow_unused=False,)
 
     flat = flatten_gradients(gradients)
+
     gradient_norm = flat.norm()
+
     cosine = F.cosine_similarity(flat, past_direction, dim=0, eps=1e-12,)
 
-    return {"loss": float(loss.item()), "grad_norm_l2": float(gradient_norm.item()), "grad_cosine_past": float(cosine.item())}
+    stage_features = compute_stage_gradient_norms(named_parameters=named_parameters, gradients=gradients,)
 
+    reconstructed_global_norm = math.sqrt(
+        sum(value ** 2 for value in stage_features.values()))
+
+    if not math.isclose(reconstructed_global_norm, float(gradient_norm.item()), rel_tol=1e-5, abs_tol=1e-7,):
+        raise RuntimeError(
+            "Stage-wise norms do not reconstruct "
+            "the global gradient norm: "
+            "global={}, reconstructed={}".format(float(gradient_norm.item()), reconstructed_global_norm,)
+        )
+
+    features = {
+        "loss": float(loss.item()),
+        "grad_norm_l2": float(gradient_norm.item()),
+        "grad_cosine_past": float(cosine.item()),
+    }
+
+    features.update(stage_features)
+
+    return features
 
 def validate_manifest_table(manifest, task_targets):
     required = {"original_index", "class_id", "split"}
@@ -216,7 +291,19 @@ def main(args):
     past_direction_cpu, _ = (compute_past_gradient_direction(model=model, inversion_files=inversion_files, device=device, batch_size=args.reference_batch_size))
     past_direction = past_direction_cpu.to(device)
 
-    _, parameters = backbone_parameters(model)
+    named_parameters, parameters = backbone_parameters(model)
+
+    print("\nBackbone parameter grouping:")
+
+    for name, parameter in named_parameters:
+        print(
+            "{:<40} {:<18} {}".format(
+                name,
+                str(tuple(parameter.shape)),
+                parameter_to_stage(name),
+            )
+        )
+
     model_before = snapshot_state_dict(model)
 
     selected = (manifest.loc[manifest["split"] != "reserve"].sort_values("original_index").reset_index(drop=True))
@@ -246,7 +333,7 @@ def main(args):
         views = [("clean", 0, clean_image), ("poison", 1, poison_image), ("random_control", -1, random_image)]
 
         for view_name, detector_label, image in views:
-            features = extract_one(model=model, parameters=parameters, past_direction=past_direction, image=image, target=class_id, device=device)
+            features = extract_one(model=model, named_parameters=named_parameters, parameters=parameters, past_direction=past_direction, image=image, target=class_id, device=device,)
             features.update({"original_index": original_index, "source_index": source_index, "class_id": class_id, "split": split_name, "view": view_name, "detector_label": int(detector_label), "attack_seed": int(artifact["seed"]), "feature_protocol": (FEATURE_PROTOCOL), "head_mode": HEAD_MODE, "head_seed": int(args.head_seed)})
             rows.append(features)
 
