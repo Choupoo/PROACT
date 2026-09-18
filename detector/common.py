@@ -1,14 +1,18 @@
+"""Artifact validation and shared utilities for the Task-9 detector."""
+
+import hashlib
+import io
+import json
+import math
 import pickle
 import random
-import sys
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import torch
 
-import hashlib
-import json
 
 def save_json(data, path):
     path = Path(path)
@@ -20,7 +24,9 @@ def save_json(data, path):
             file,
             indent=2,
             sort_keys=True,
+            allow_nan=False,
         )
+        file.write("\n")
 
 
 def sha256_file(path):
@@ -29,41 +35,12 @@ def sha256_file(path):
 
     with path.open("rb") as file:
         for chunk in iter(
-                lambda: file.read(1024 * 1024),
-                b"",
+            lambda: file.read(1024 * 1024),
+            b"",
         ):
             digest.update(chunk)
 
     return digest.hexdigest()
-
-def find_proact_root(start=None):
-    if start is None:
-        start = Path.cwd()
-
-    start = Path(start).resolve()
-    candidates = [start] + list(start.parents)
-
-    for candidate in candidates:
-        if (
-            (candidate / "main_brainwash.py").is_file()
-            and (candidate / "main_baselines.py").is_file()
-            and (candidate / "data_utils.py").is_file()
-            and (candidate / "utils.py").is_file()
-        ):
-            return candidate
-
-    raise FileNotFoundError(
-        "Could not find the PROACT repository root. "
-        "Run the command from inside the PROACT repository."
-    )
-
-
-def add_proact_to_path(proact_root=None):
-    root = find_proact_root(proact_root)
-    root_str = str(root)
-    if root_str not in sys.path:
-        sys.path.insert(0, root_str)
-    return root
 
 
 def set_seed(seed):
@@ -80,18 +57,32 @@ def load_pickle(path):
     if not path.is_file():
         raise FileNotFoundError("File not found: {}".format(path))
     with path.open("rb") as file:
-        return pickle.load(file)
+        return _CPUUnpickler(file).load()
+
+
+class _CPUUnpickler(pickle.Unpickler):
+    """Read TRUSTED upstream CUDA pickles on CPU before choosing a device.
+
+    This is device remapping, not a safe-unpickling sandbox. A pickle can still
+    execute arbitrary code; only use files from a trusted experiment.
+    """
+
+    def find_class(self, module, name):
+        if module == "torch.storage" and name == "_load_from_bytes":
+            return lambda value: torch.load(
+                io.BytesIO(value), map_location="cpu", weights_only=False
+            )
+        return super().find_class(module, name)
+
 
 def normalize_task_order(task_order):
     normalized = []
     for task_classes in task_order:
         if torch.is_tensor(task_classes):
-            values = (task_classes.detach().cpu().numpy().tolist())
+            values = task_classes.detach().cpu().numpy().tolist()
         else:
             values = np.asarray(task_classes).tolist()
-        normalized.append(
-            [int(value) for value in values]
-        )
+        normalized.append([int(value) for value in values])
     return normalized
 
 
@@ -106,6 +97,7 @@ def validate_victim_checkpoint(checkpoint):
         "task_order",
         "model",
         "class_num",
+        "model_type",
     }
 
     missing = required - set(checkpoint.keys())
@@ -115,8 +107,13 @@ def validate_victim_checkpoint(checkpoint):
     if checkpoint["dataset"] != "split_cifar100":
         raise ValueError("This first experiment supports only split_cifar100.")
 
+    if checkpoint["model_type"] != "resnet":
+        raise ValueError("Stage-gradient features require the PROACT ResNet backbone.")
+
     if int(checkpoint["task_num"]) != 9:
-        raise ValueError("Expected checkpoint['task_num'] == 9. In PROACT this reconstructs ten tasks and leaves task 9 as the incoming task.")
+        raise ValueError(
+            "Expected checkpoint['task_num'] == 9. In PROACT this reconstructs ten tasks and leaves task 9 as the incoming task."
+        )
 
     if int(checkpoint["class_num"]) != 10:
         raise ValueError("Expected ten task-local classes for Split CIFAR-100.")
@@ -149,12 +146,20 @@ def validate_attack_artifact(artifact, expected_size=5000):
     validate_victim_checkpoint(artifact["pretrained_ckpt"])
 
     if artifact["mode"] != "reckless":
-        raise ValueError("The pre-registered first experiment uses reckless BrainWash.")
+        raise ValueError("This detector experiment uses reckless BrainWash.")
+
+    if artifact.get("reverse", False):
+        raise ValueError("A reverse (defense) artifact is not a BrainWash attack.")
 
     if int(artifact["attacked_task"]) != 9:
         raise ValueError("Expected attacked_task == 9.")
 
-    permutation = torch.as_tensor(artifact["rnd_idx_train"]).long().cpu()
+    raw_permutation = torch.as_tensor(artifact["rnd_idx_train"]).cpu()
+    permutation = raw_permutation.long()
+    if not torch.isfinite(raw_permutation).all() or not torch.equal(
+        raw_permutation, permutation
+    ):
+        raise ValueError("rnd_idx_train must contain finite integer indices.")
 
     noise = torch.as_tensor(artifact["latest_noise"]).float().cpu()
 
@@ -163,31 +168,55 @@ def validate_attack_artifact(artifact, expected_size=5000):
 
     if len(permutation) != expected_size:
         raise ValueError(
-            "Expected {} permutation entries, found {}.".format(expected_size, len(permutation)))
+            "Expected {} permutation entries, found {}.".format(
+                expected_size, len(permutation)
+            )
+        )
 
     expected = torch.arange(expected_size)
-    if not torch.equal(torch.sort(permutation).values,expected):
-        raise ValueError("rnd_idx_train is not a permutation of 0..{}.".format(expected_size - 1))
+    if not torch.equal(torch.sort(permutation).values, expected):
+        raise ValueError(
+            "rnd_idx_train is not a permutation of 0..{}.".format(expected_size - 1)
+        )
 
     expected_shape = (expected_size, 3, 32, 32)
     if tuple(noise.shape) != expected_shape:
         raise ValueError(
-            "Expected latest_noise shape {}, found {}.".format(expected_shape, tuple(noise.shape)))
+            "Expected latest_noise shape {}, found {}.".format(
+                expected_shape, tuple(noise.shape)
+            )
+        )
 
     delta = float(artifact["delta"])
+    if not math.isfinite(delta) or delta <= 0:
+        raise ValueError("The L-infinity budget must be finite and positive.")
+    if not torch.isfinite(noise).all():
+        raise ValueError("latest_noise contains non-finite values.")
     if noise.abs().max().item() > delta + 1e-5:
         raise ValueError("latest_noise exceeds the declared L-infinity budget.")
+
 
 def compare_checkpoint_identity(victim_checkpoint, artifact_checkpoint):
     validate_victim_checkpoint(victim_checkpoint)
     validate_victim_checkpoint(artifact_checkpoint)
 
-    metadata_keys = ["dataset", "task_num", "class_num", "seed", "model_type", "model_name"]
+    metadata_keys = [
+        "dataset",
+        "task_num",
+        "class_num",
+        "seed",
+        "model_type",
+        "model_name",
+    ]
 
     for key in metadata_keys:
         if key in victim_checkpoint or key in artifact_checkpoint:
             if victim_checkpoint.get(key) != artifact_checkpoint.get(key):
-                raise RuntimeError("Victim/artifact checkpoint mismatch for {!r}: {} != {}".format(key, victim_checkpoint.get(key), artifact_checkpoint.get(key)))
+                raise RuntimeError(
+                    "Victim/artifact checkpoint mismatch for {!r}: {} != {}".format(
+                        key, victim_checkpoint.get(key), artifact_checkpoint.get(key)
+                    )
+                )
 
     victim_order = normalize_task_order(victim_checkpoint["task_order"])
     artifact_order = normalize_task_order(artifact_checkpoint["task_order"])
@@ -205,16 +234,22 @@ def compare_checkpoint_identity(victim_checkpoint, artifact_checkpoint):
         left = torch.as_tensor(victim_state[name]).detach().cpu()
         right = torch.as_tensor(artifact_state[name]).detach().cpu()
         if not torch.equal(left, right):
-            raise RuntimeError("Victim and attack artifact differ at model tensor: {}".format(name))
+            raise RuntimeError(
+                "Victim and attack artifact differ at model tensor: {}".format(name)
+            )
 
 
 def reconstruct_incoming_task(checkpoint):
-    add_proact_to_path()
+    # Run the CLI as `python -m detector.<module>` from the PROACT root.
     from data_utils import get_dataset_specs
 
     validate_victim_checkpoint(checkpoint)
 
-    config = {"dataset": checkpoint["dataset"], "task_num": int(checkpoint["task_num"]), "seed": int(checkpoint["seed"]),}
+    config = {
+        "dataset": checkpoint["dataset"],
+        "task_num": int(checkpoint["task_num"]),
+        "seed": int(checkpoint["seed"]),
+    }
 
     (
         dataset_dict,
@@ -231,12 +266,20 @@ def reconstruct_incoming_task(checkpoint):
     reconstructed_order = normalize_task_order(reconstructed_order)
 
     if saved_order != reconstructed_order:
-        raise RuntimeError("Reconstructed task order differs from checkpoint task_order.")
+        raise RuntimeError(
+            "Reconstructed task order differs from checkpoint task_order."
+        )
 
     task_index = int(checkpoint["task_num"])
     dataset = dataset_dict["train"][task_index]
 
-    return dataset, {"task_index": task_index, "task_order": reconstructed_order, "image_size": int(image_size), "class_num": int(class_num), "embedding_factor": int(embedding_factor)}
+    return dataset, {
+        "task_index": task_index,
+        "task_order": reconstructed_order,
+        "image_size": int(image_size),
+        "class_num": int(class_num),
+        "embedding_factor": int(embedding_factor),
+    }
 
 
 def get_model_heads(model):
@@ -246,16 +289,13 @@ def get_model_heads(model):
 
 
 def initialize_defender_head(model, head_seed):
+    """Reset only the incoming head while preserving all global RNG states."""
     heads = get_model_heads(model)
     if len(heads) != 10:
         raise RuntimeError("Expected ten task heads, found {}.".format(len(heads)))
     head = heads[-1]
     torch_state = torch.random.get_rng_state()
-    cuda_state = (
-        torch.cuda.get_rng_state_all()
-        if torch.cuda.is_available()
-        else None
-    )
+    cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     numpy_state = np.random.get_state()
     python_state = random.getstate()
     try:
@@ -289,35 +329,87 @@ def assert_model_unchanged(model, before):
         current = after[name].detach().cpu()
 
         if not torch.equal(old_value, current):
-            raise RuntimeError("Model changed during feature extraction: {}".format(name))
+            raise RuntimeError(
+                "Model changed during feature extraction: {}".format(name)
+            )
+
+
+def inversion_task_id(path, data):
+    """Resolve the saved task id, falling back to PROACT's `_tid_XX` filename."""
+    match = re.search(r"_tid_(\d+)$", Path(path).stem)
+    filename_id = int(match.group(1)) if match else None
+    if "tid" in data:
+        value = np.asarray(data["tid"])
+        if value.size != 1 or not np.isfinite(value).all():
+            raise ValueError("Invalid inversion task id in {}.".format(path))
+        scalar = value.item()
+        task_id = int(scalar)
+        if scalar != task_id:
+            raise ValueError("Inversion task id must be an integer: {}.".format(path))
+        if filename_id is not None and filename_id != task_id:
+            raise ValueError(
+                "Inversion task id disagrees with filename: {}.".format(path)
+            )
+        return task_id
+    if filename_id is None:
+        raise ValueError(
+            "Missing inversion task id (tid or _tid_XX filename): {}.".format(path)
+        )
+    return filename_id
 
 
 def matching_inversion_files(folder, expected_count=9):
+    """Return one validated inversion file per task, ordered by actual task id."""
     folder = Path(folder)
 
     if not folder.is_dir():
         raise FileNotFoundError("Inversion folder not found: {}".format(folder))
 
-    paths = sorted(
-        path
-        for path in folder.iterdir()
-        if path.suffix == ".npz"
-    )
+    paths = sorted(path for path in folder.iterdir() if path.suffix == ".npz")
 
     if len(paths) != expected_count:
-        raise RuntimeError("Expected exactly {} inversion NPZ files, found {}: {}".format(expected_count, len(paths), [path.name for path in paths]))
+        raise RuntimeError(
+            "Expected exactly {} inversion NPZ files, found {}: {}".format(
+                expected_count, len(paths), [path.name for path in paths]
+            )
+        )
 
+    by_task = {}
     for path in paths:
         with np.load(path) as data:
             missing = {"x_dst", "y_dst"} - set(data.files)
             if missing:
                 raise KeyError("{} is missing arrays: {}".format(path, sorted(missing)))
-    return paths
-
-
-def quantile_higher(values, q):
-    values = np.asarray(values, dtype=np.float64)
-    try:
-        return float(np.quantile(values, q, method="higher"))
-    except TypeError:
-        return float(np.quantile(values, q, interpolation="higher"))
+            task_id = inversion_task_id(path, data)
+            images, labels = data["x_dst"], data["y_dst"]
+            if images.ndim != 4 or tuple(images.shape[1:]) != (3, 32, 32):
+                raise ValueError(
+                    "Expected N x 3 x 32 x 32 inversion images: {}.".format(path)
+                )
+            if labels.ndim != 1 or not len(labels) or len(images) != len(labels):
+                raise ValueError(
+                    "Inversion images and labels must be nonempty and aligned: {}.".format(
+                        path
+                    )
+                )
+            if not np.isfinite(images).all() or not np.isfinite(labels).all():
+                raise ValueError("Non-finite inversion data: {}.".format(path))
+            if (
+                not np.equal(labels, labels.astype(np.int64)).all()
+                or not ((labels >= 0) & (labels < 10)).all()
+            ):
+                raise ValueError(
+                    "Inversion labels must be task-local integers 0..9: {}.".format(
+                        path
+                    )
+                )
+            if task_id in by_task:
+                raise ValueError("Duplicate inversion task id: {}.".format(task_id))
+            by_task[task_id] = path
+    if set(by_task) != set(range(expected_count)):
+        raise ValueError(
+            "Expected inversion tasks 0..{}, found {}.".format(
+                expected_count - 1, sorted(by_task)
+            )
+        )
+    return [by_task[task_id] for task_id in range(expected_count)]

@@ -1,0 +1,10 @@
+# Use Python 3.10 or 3.11; install matching torch/torchvision builds separately.
+numpy>=1.24,<2
+pandas>=1.5,<3
+scipy>=1.10,<2
+scikit-learn>=1.2,<2
+joblib>=1.2,<2
+PyYAML>=6,<7
+matplotlib>=3.6,<4
+seaborn>=0.12,<1
+tqdm>=4.64,<5

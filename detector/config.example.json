@@ -1,0 +1,19 @@
+{
+  "checkpoint": "work/artifacts/victim/checkpoint.pkl",
+  "artifact": "work/artifacts/attack/noise.pkl",
+  "inversion_dir": "work/artifacts/inversions",
+  "data_cwd": "work/artifacts",
+  "run_dir": "work/full_v2_seed0",
+  "device": "cuda",
+  "feature_set": "extended",
+  "split_seed": 20260720,
+  "head_seed": 20260720,
+  "feature_seed": 20260721,
+  "random_control_seed": 20260722,
+  "task_size": 150,
+  "bags_per_rate": 1000,
+  "unsupervised_tasks_per_rate": 100,
+  "permutations": 199,
+  "alpha": 0.05,
+  "target_clean_fpr": 0.05
+}

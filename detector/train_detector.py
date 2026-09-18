@@ -1,7 +1,9 @@
+"""Train a paired supervised baseline with validation-only threshold calibration."""
+
 import argparse
 import json
 from pathlib import Path
-import joblib
+
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
@@ -16,76 +18,207 @@ from sklearn.metrics import (
 from sklearn.preprocessing import StandardScaler
 
 from detector import (
+    ACTIVATION_FEATURE_COLUMNS,
+    BASE_FEATURE_COLUMNS,
     FEATURE_COLUMNS,
     FEATURE_PROTOCOL,
     HEAD_MODE,
+    STAGE_GRAD_FEATURE_COLUMNS,
+    STAGE_NAMES,
+    TASK_COSINE_FEATURE_COLUMNS,
+    UNCERTAINTY_FEATURE_COLUMNS,
 )
-from detector.common import *
+from detector.common import save_json, sha256_file
+from detector.io_utils import (
+    assert_compatible_provenance,
+    ensure_output_path,
+    feature_provenance,
+    load_frozen_bundle,
+    read_feature_table,
+    save_frozen_bundle,
+)
+
+FEATURE_SETS = {
+    "baseline": BASE_FEATURE_COLUMNS,
+    "stages": STAGE_GRAD_FEATURE_COLUMNS,
+    "extended": FEATURE_COLUMNS,
+    "parameters": None,
+    "layers": None,
+    "all": FEATURE_COLUMNS,
+}
+IDENTITY_COLUMNS = [
+    "original_index",
+    "source_index",
+    "class_id",
+    "split",
+    "view",
+    "detector_label",
+]
+INTEGER_COLUMNS = [
+    "original_index",
+    "source_index",
+    "class_id",
+    "detector_label",
+    "head_seed",
+    "attack_seed",
+]
+METADATA_COLUMNS = IDENTITY_COLUMNS + [
+    "feature_protocol",
+    "head_mode",
+    "head_seed",
+    "attack_seed",
+    "label_mode",
+]
+THRESHOLD_RULE = (
+    "With prediction score >= threshold, allow at most floor(target_clean_fpr * "
+    "n_validation_clean) clean positives. Set threshold immediately above the "
+    "next excluded score using numpy.nextafter, conservatively excluding ties. "
+    "This controls observed validation FPR only, not population or test FPR."
+)
+
+
+def feature_sets(features):
+    """Discover frozen scalar, stage, layer, and parameter-tensor feature groups."""
+    parameter_columns = sorted(c for c in features if c.startswith("grad_norm_param__"))
+    layer_columns = sorted(c for c in features if c.startswith("grad_norm_layer__"))
+    task_columns = sorted(
+        c
+        for c in features
+        if c.startswith("grad_cosine_task_") and c.rsplit("_", 1)[-1].isdigit()
+    )
+    return {
+        "baseline": list(BASE_FEATURE_COLUMNS),
+        "stages": list(STAGE_GRAD_FEATURE_COLUMNS),
+        "extended": list(FEATURE_COLUMNS),
+        "parameters": parameter_columns,
+        "layers": layer_columns,
+        "all": list(FEATURE_COLUMNS) + parameter_columns + layer_columns + task_columns,
+    }
 
 
 def validate_feature_table(features):
-    required = {"original_index", "source_index", "class_id", "split", "view", "detector_label", "feature_protocol", "head_mode", "head_seed"}.union(FEATURE_COLUMNS)
-
+    """Reject incomplete pairs, inconsistent provenance, and invalid values."""
+    required = set(METADATA_COLUMNS + FEATURE_COLUMNS)
     missing = required - set(features.columns)
     if missing:
         raise KeyError("Feature table is missing columns: {}".format(sorted(missing)))
+    if features.columns.duplicated().any():
+        raise RuntimeError("Feature table contains duplicate column names.")
+    if features.empty or features[list(required)].isna().any().any():
+        raise RuntimeError(
+            "Feature table is empty or contains missing features/metadata."
+        )
 
-    if set(features["feature_protocol"].unique()) != {FEATURE_PROTOCOL}:
-        raise RuntimeError("Unexpected feature protocol.")
+    for column in INTEGER_COLUMNS:
+        if not pd.api.types.is_numeric_dtype(features[column]):
+            raise RuntimeError("{} must contain numeric integers.".format(column))
+        values = features[column].to_numpy(dtype=np.float64)
+        if (
+            not np.isfinite(values).all()
+            or not np.equal(values, np.floor(values)).all()
+            or np.any(values < -(2**63))
+            or np.any(values >= 2**63)
+        ):
+            raise RuntimeError(
+                "{} must contain finite int64-compatible integers.".format(column)
+            )
+        if column != "detector_label" and np.any(values < 0):
+            raise RuntimeError("{} must be nonnegative.".format(column))
 
-    if set(features["head_mode"].unique()) != {HEAD_MODE}:
+    if set(features["feature_protocol"]) != {FEATURE_PROTOCOL}:
+        raise RuntimeError(
+            "Unexpected feature protocol; re-extract the current feature schema."
+        )
+    if set(features["head_mode"]) != {HEAD_MODE}:
         raise RuntimeError("Features were not produced with defender_fixed head mode.")
+    for column in ("head_seed", "attack_seed", "label_mode"):
+        if features[column].nunique() != 1:
+            raise RuntimeError(
+                "The single-attack baseline requires one {}.".format(column)
+            )
 
-    allowed_splits = {"train", "validation", "test"}
-    if set(features["split"].unique()) != allowed_splits:
-        raise RuntimeError("Features must contain only train, validation and test.")
-
+    if not set(features["label_mode"]).issubset({"ground_truth", "predicted"}):
+        raise RuntimeError("label_mode must be ground_truth or predicted.")
+    required_splits = {"train", "validation", "test"}
+    allowed_splits = required_splits | {"reserve"}
     allowed_views = {"clean", "poison", "random_control"}
-    if set(features["view"].unique()) != allowed_views:
-        raise RuntimeError("Feature table must contain clean, poison and random_control.")
+    if not required_splits.issubset(set(features["split"])) or not set(
+        features["split"]
+    ).issubset(allowed_splits):
+        raise RuntimeError(
+            "Features must contain train, validation and test; reserve is optional."
+        )
+    if set(features["view"]) != allowed_views:
+        raise RuntimeError(
+            "Feature table must contain clean, poison and random_control."
+        )
+    if not features["class_id"].between(0, 9).all():
+        raise RuntimeError("Expected task-local class_id values in 0..9.")
 
     for original_index, group in features.groupby("original_index"):
-        if len(group) != 3:
-            raise RuntimeError("original_index {} does not have three views.".format(original_index))
-
-        if set(group["view"]) != allowed_views:
-            raise RuntimeError("original_index {} has an incomplete view set.".format(original_index))
-
-        if group["split"].nunique() != 1:
-            raise RuntimeError("Views of original_index {} are in different splits.".format(original_index))
-
-        if group["class_id"].nunique() != 1:
-            raise RuntimeError("Views of original_index {} have different labels.".format(original_index))
-
+        if len(group) != 3 or set(group["view"]) != allowed_views:
+            raise RuntimeError(
+                "original_index {} must have exactly three distinct views.".format(
+                    original_index
+                )
+            )
+        for column in ("split", "class_id", "source_index"):
+            if group[column].nunique() != 1:
+                raise RuntimeError(
+                    "Views of original_index {} disagree on {}.".format(
+                        original_index, column
+                    )
+                )
         labels = dict(zip(group["view"], group["detector_label"]))
         if labels != {"clean": 0, "poison": 1, "random_control": -1}:
-            raise RuntimeError("Incorrect detector labels for original_index {}.".format(original_index))
+            raise RuntimeError(
+                "Incorrect detector labels for original_index {}.".format(
+                    original_index
+                )
+            )
 
-    split_sets = {
-        split_name: set(features.loc[features["split"] == split_name, "original_index"].astype(int))
-        for split_name in allowed_splits
-    }
+    sources = features[["original_index", "source_index"]].drop_duplicates()
+    if sources["source_index"].duplicated().any():
+        raise RuntimeError(
+            "Different original images share the same attack source_index."
+        )
 
-    split_names = sorted(allowed_splits)
-    for i, first in enumerate(split_names):
-        for second in split_names[i + 1:]:
-            overlap = split_sets[first] & split_sets[second]
-            if overlap:
-                raise RuntimeError("{} and {} share original images.".format(first, second))
+    all_columns = feature_sets(features)["all"]
+    for column in all_columns:
+        if not pd.api.types.is_numeric_dtype(features[column]):
+            raise RuntimeError("Feature {} must be numeric.".format(column))
+    if not np.isfinite(features[all_columns].to_numpy(dtype=np.float64)).all():
+        raise RuntimeError("Feature table contains non-finite feature values.")
 
-    if features[FEATURE_COLUMNS].isna().any().any():
-        raise RuntimeError("Feature table contains NaN values.")
 
-    if not np.isfinite(features[FEATURE_COLUMNS].to_numpy(dtype=float)).all():
-        raise RuntimeError("Feature table contains non-finite values.")
+def select_clean_threshold(clean_scores, target_clean_fpr):
+    """Choose a >= threshold with empirical clean FPR at most the target."""
+    scores = np.asarray(clean_scores, dtype=np.float64)
+    target = float(target_clean_fpr)
+    if scores.ndim != 1 or scores.size == 0 or not np.isfinite(scores).all():
+        raise ValueError(
+            "clean_scores must be a non-empty finite one-dimensional array."
+        )
+    if not np.isfinite(target) or not 0.0 <= target <= 1.0:
+        raise ValueError("target_clean_fpr must lie in [0, 1].")
+    if np.any((scores < 0.0) | (scores > 1.0)):
+        raise ValueError("Clean classifier probabilities must lie in [0, 1].")
+
+    # Decrement if floating-point multiplication rounded the budget upward.
+    allowed = int(np.floor(target * scores.size))
+    while allowed > 0 and allowed / scores.size > target:
+        allowed -= 1
+    if allowed == scores.size:
+        return float(scores.min())
+    descending = np.sort(scores)[::-1]
+    return float(np.nextafter(descending[allowed], np.inf))
 
 
 def binary_metrics(y_true, probabilities, threshold):
+    """Summarize ranking and decisions for both detector classes."""
     predictions = (probabilities >= threshold).astype(np.int64)
-
     matrix = confusion_matrix(y_true, predictions, labels=[0, 1])
     tn, fp, fn, tp = matrix.ravel()
-
     return {
         "roc_auc": float(roc_auc_score(y_true, probabilities)),
         "average_precision": float(average_precision_score(y_true, probabilities)),
@@ -99,186 +232,315 @@ def binary_metrics(y_true, probabilities, threshold):
     }
 
 
-def main(args):
-    features_path = Path(args.features)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    features = pd.read_csv(features_path)
-    validate_feature_table(features)
-
-    supervised = features.loc[features["view"].isin(["clean", "poison"])].copy()
-
-    train = supervised.loc[supervised["split"] == "train"].copy()
-    validation = supervised.loc[supervised["split"] == "validation"].copy()
-    test = supervised.loc[supervised["split"] == "test"].copy()
-
-    for name, table in [("train", train), ("validation", validation), ("test", test)]:
-        if table.empty:
-            raise RuntimeError("{} split is empty.".format(name))
-
-        if set(table["detector_label"].unique()) != {0, 1}:
-            raise RuntimeError("{} split must contain clean and poison rows.".format(name))
-
+def fit_detector(train, columns, classifier_seed):
+    """Fit scaling and logistic regression using training rows only."""
     scaler = StandardScaler()
-    x_train = scaler.fit_transform(train[FEATURE_COLUMNS].to_numpy(dtype=np.float64))
-    y_train = train["detector_label"].to_numpy(dtype=np.int64)
+    x_train = scaler.fit_transform(train[columns].to_numpy(dtype=np.float64))
+    classifier = LogisticRegression(
+        C=1.0,
+        penalty="l2",
+        solver="lbfgs",
+        max_iter=2000,
+        random_state=int(classifier_seed),
+    )
+    classifier.fit(x_train, train["detector_label"].to_numpy(dtype=np.int64))
+    return scaler, classifier
 
-    classifier = LogisticRegression(C=1.0, penalty="l2", solver="lbfgs", max_iter=2000, random_state=int(args.classifier_seed))
-    classifier.fit(x_train, y_train)
 
-    x_validation = scaler.transform(validation[FEATURE_COLUMNS].to_numpy(dtype=np.float64))
-    validation_probabilities = (classifier.predict_proba(x_validation)[:, 1])
+def predict_scores(table, columns, scaler, classifier):
+    """Return sample scores; these are not calibrated dataset probabilities."""
+    values = scaler.transform(table[columns].to_numpy(dtype=np.float64))
+    return classifier.predict_proba(values)[:, 1]
 
-    validation_clean_scores = (validation_probabilities[validation["detector_label"].to_numpy()== 0])
 
-    threshold = quantile_higher(validation_clean_scores, 1.0 - float(args.target_clean_fpr))
+def calibrate_validation(validation, scores, target_clean_fpr):
+    """Select the clean threshold and report held-out validation performance."""
+    labels = validation["detector_label"].to_numpy(dtype=np.int64)
+    threshold = select_clean_threshold(scores[labels == 0], target_clean_fpr)
+    return threshold, binary_metrics(labels, scores, threshold)
 
-    validation_metrics = binary_metrics(validation["detector_label"].to_numpy(dtype=np.int64), validation_probabilities, threshold)
 
-    x_test = scaler.transform(test[FEATURE_COLUMNS].to_numpy(dtype=np.float64))
-    test_probabilities = (classifier.predict_proba(x_test)[:, 1])
+def compare_feature_sets(train, validation, classifier_seed, target_clean_fpr):
+    """Compare fixed feature sets on identical train/validation rows only."""
+    groups = feature_sets(train)
+    candidates = [(name, columns) for name, columns in groups.items() if columns] + [
+        ("stage_" + stage, [column])
+        for stage, column in zip(STAGE_NAMES, STAGE_GRAD_FEATURE_COLUMNS)
+    ]
+    candidates += [
+        (column, [column]) for column in groups["layers"] + groups["parameters"]
+    ]
+    families = {
+        "task_cosines": TASK_COSINE_FEATURE_COLUMNS,
+        "uncertainty": UNCERTAINTY_FEATURE_COLUMNS,
+        "activation": ACTIVATION_FEATURE_COLUMNS,
+        "stages": STAGE_GRAD_FEATURE_COLUMNS,
+    }
+    for family, columns in families.items():
+        candidates.append(("baseline_plus_" + family, BASE_FEATURE_COLUMNS + columns))
+        candidates.append(
+            (
+                "extended_without_" + family,
+                [column for column in FEATURE_COLUMNS if column not in columns],
+            )
+        )
+    rows = []
+    for name, columns in candidates:
+        scaler, classifier = fit_detector(train, columns, classifier_seed)
+        scores = predict_scores(validation, columns, scaler, classifier)
+        threshold, metrics = calibrate_validation(validation, scores, target_clean_fpr)
+        rows.append(
+            {
+                "feature_set": name,
+                "feature_columns": "|".join(columns),
+                "n_features": len(columns),
+                "validation_roc_auc": metrics["roc_auc"],
+                "validation_average_precision": metrics["average_precision"],
+                "validation_poison_tpr": metrics["poison_tpr"],
+                "validation_clean_fpr": metrics["clean_fpr"],
+                "target_clean_fpr": float(target_clean_fpr),
+                "threshold": threshold,
+                "evaluation_split": "validation",
+            }
+        )
+    comparison = (
+        pd.DataFrame(rows)
+        .sort_values(
+            ["validation_roc_auc", "validation_poison_tpr", "feature_set"],
+            ascending=[False, False, True],
+        )
+        .reset_index(drop=True)
+    )
+    comparison.insert(0, "validation_rank", np.arange(1, len(comparison) + 1))
+    return comparison
 
-    test_metrics = binary_metrics(test["detector_label"].to_numpy(dtype=np.int64), test_probabilities, threshold)
 
-    random_test = features.loc[(features["split"] == "test") & (features["view"] == "random_control")].copy()
+def save_predictions(table, probabilities, threshold, path):
+    """Write scores alongside the source identity of each evaluated view."""
+    predictions = table[IDENTITY_COLUMNS].copy()
+    predictions["poison_probability"] = probabilities
+    predictions["prediction"] = (probabilities >= threshold).astype(np.int64)
+    predictions.to_csv(path, index=False)
 
-    random_probabilities = classifier.predict_proba(scaler.transform(random_test[FEATURE_COLUMNS].to_numpy(dtype=np.float64)))[:, 1]
 
-    random_positive_rate = float(np.mean(random_probabilities >= threshold))
-
+def evaluate_frozen_sample(features, bundle, metadata, output_dir):
+    """Score held-out test views with a verified frozen model and threshold."""
+    assert_compatible_provenance(bundle["provenance"], feature_provenance(metadata))
+    test_all = features.loc[features["split"] == "test"]
+    forbidden = set(bundle["fit_original_indices"]) | set(
+        bundle["calibration_original_indices"]
+    )
+    if set(test_all["original_index"]) & forbidden:
+        raise ValueError("Test originals overlap sample fitting/calibration IDs.")
+    test = test_all.loc[test_all["view"].isin(["clean", "poison"])]
+    random_test = test_all.loc[test_all["view"] == "random_control"]
+    columns, scaler, classifier = (
+        bundle["feature_columns"],
+        bundle["scaler"],
+        bundle["classifier"],
+    )
+    threshold = bundle["threshold"]
+    test_scores = predict_scores(test, columns, scaler, classifier)
+    random_scores = predict_scores(random_test, columns, scaler, classifier)
     metrics = {
-        "feature_protocol": FEATURE_PROTOCOL,
-        "feature_columns": FEATURE_COLUMNS,
-        "classifier": (
-            "StandardScaler fit on train only, followed by "
-            "L2 logistic regression."
-        ),
-        "classifier_seed": int(args.classifier_seed),
-        "threshold_rule": (
-            "Higher empirical quantile of validation-clean scores "
-            "at 1 - target_clean_fpr."
-        ),
-        "target_clean_fpr": float(
-            args.target_clean_fpr
-        ),
-        "threshold": float(threshold),
-        "train_original_images": int(
-            train["original_index"].nunique()
-        ),
-        "validation_original_images": int(
-            validation["original_index"].nunique()
-        ),
-        "test_original_images": int(
-            test["original_index"].nunique()
-        ),
-        "validation": validation_metrics,
-        "test": test_metrics,
-        "random_control_test": {
-            "samples": int(len(random_test)),
-            "mean_poison_probability": float(
-                random_probabilities.mean()
-            ),
-            "positive_rate_at_frozen_threshold": (
-                random_positive_rate
-            ),
-        },
-        "test_used_for_training": False,
-        "test_used_for_threshold_selection": False,
+        key: value
+        for key, value in bundle.items()
+        if key not in {"scaler", "classifier"}
     }
-
-    bundle = {
-        "scaler": scaler,
-        "classifier": classifier,
-        "threshold": float(threshold),
-        "feature_columns": list(FEATURE_COLUMNS),
-        "feature_protocol": FEATURE_PROTOCOL,
-        "classifier_seed": int(
-            args.classifier_seed
-        ),
-        "target_clean_fpr": float(
-            args.target_clean_fpr
-        ),
-    }
-
-    bundle_path = output_dir / "detector_bundle.joblib"
-    metrics_path = output_dir / "metrics.json"
-    predictions_path = output_dir / "test_predictions.csv"
-    coefficients_path = output_dir / "coefficients.csv"
-
-    joblib.dump(bundle, bundle_path)
-
-    predictions = test[
-        [
-            "original_index",
-            "source_index",
-            "class_id",
-            "split",
-            "view",
-            "detector_label",
-        ]
-    ].copy()
-    predictions["poison_probability"] = test_probabilities
-    predictions["prediction"] = (
-        test_probabilities >= threshold
-    ).astype(np.int64)
-    predictions.to_csv(
-        predictions_path,
-        index=False,
-    )
-
-    random_predictions = random_test[
-        [
-            "original_index",
-            "source_index",
-            "class_id",
-            "split",
-            "view",
-        ]
-    ].copy()
-    random_predictions["poison_probability"] = (
-        random_probabilities
-    )
-    random_predictions["prediction"] = (
-        random_probabilities >= threshold
-    ).astype(np.int64)
-    random_predictions.to_csv(
-        output_dir / "random_control_test_predictions.csv",
-        index=False,
-    )
-
-    coefficients = pd.DataFrame(
+    metrics.update(
         {
-            "feature": FEATURE_COLUMNS,
-            "standardized_coefficient": (
-                classifier.coef_[0]
+            "test": binary_metrics(
+                test["detector_label"].to_numpy(dtype=np.int64), test_scores, threshold
             ),
+            "random_control_test": {
+                "samples": int(len(random_test)),
+                "mean_poison_probability": float(random_scores.mean()),
+                "positive_rate_at_frozen_threshold": float(
+                    np.mean(random_scores >= threshold)
+                ),
+            },
+            "test_original_images": int(test["original_index"].nunique()),
+            "test_used_for_training": False,
+            "test_used_for_threshold_selection": False,
+            "test_used_for_feature_comparison": False,
+            "evaluation_features_sha256": metadata["features_sha256"],
         }
     )
-    coefficients.to_csv(
-        coefficients_path,
-        index=False,
+    output_dir = ensure_output_path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_predictions(test, test_scores, threshold, output_dir / "test_predictions.csv")
+    save_predictions(
+        random_test,
+        random_scores,
+        threshold,
+        output_dir / "random_control_test_predictions.csv",
+    )
+    save_json(metrics, output_dir / "metrics.json")
+    return metrics
+
+
+def main(args):
+    features_path = Path(args.features)
+    output_dir = ensure_output_path(args.output_dir)
+    feature_set = getattr(args, "feature_set", "all")
+    compare_stages = bool(
+        getattr(args, "compare_stages", False)
+        or getattr(args, "compare_features", False)
+    )
+    fit_only = bool(getattr(args, "fit_only", False))
+    target_clean_fpr = float(args.target_clean_fpr)
+    # Check calibration arguments before any model fit or output.
+    select_clean_threshold([0.5], target_clean_fpr)
+
+    features, feature_metadata = read_feature_table(features_path)
+    validate_feature_table(features)
+    if feature_metadata.get("origin_role") != "paired_benchmark":
+        raise ValueError(
+            "Supervised fitting requires paired_benchmark feature provenance."
+        )
+    row_provenance = feature_provenance(feature_metadata)
+    for key in ("feature_protocol", "head_mode", "head_seed", "label_mode"):
+        row_provenance[key] = features[key].iloc[0]
+    assert_compatible_provenance(feature_provenance(feature_metadata), row_provenance)
+    if getattr(args, "evaluate_bundle", None):
+        if compare_stages or fit_only:
+            raise ValueError(
+                "--evaluate-bundle cannot be combined with fitting/comparison modes."
+            )
+        bundle = load_frozen_bundle(args.evaluate_bundle)
+        metrics = evaluate_frozen_sample(features, bundle, feature_metadata, output_dir)
+        print(json.dumps(metrics["test"], indent=2))
+        return
+    columns = feature_sets(features)[feature_set]
+    if not columns:
+        raise RuntimeError("No columns found for feature set {}.".format(feature_set))
+    if not set(feature_sets(features)["all"]).issubset(
+        feature_metadata["feature_columns"]
+    ):
+        raise ValueError(
+            "An input feature is absent from the extraction metadata schema."
+        )
+    supervised = features.loc[features["view"].isin(["clean", "poison"])]
+    splits = {
+        name: supervised.loc[supervised["split"] == name].copy()
+        for name in ("train", "validation", "test")
+    }
+    train, validation, test = (splits[name] for name in ("train", "validation", "test"))
+    provenance = {
+        "feature_protocol": FEATURE_PROTOCOL,
+        "head_mode": HEAD_MODE,
+        "head_seed": int(features["head_seed"].iloc[0]),
+        "attack_seed": int(features["attack_seed"].iloc[0]),
+        "label_mode": str(features["label_mode"].iloc[0]),
+        "feature_metadata": feature_metadata,
+        "provenance": feature_provenance(feature_metadata),
+        "classifier_seed": int(args.classifier_seed),
+        "features_path": str(features_path.resolve()),
+        "features_sha256": sha256_file(features_path),
+        "target_clean_fpr": target_clean_fpr,
+        "threshold_rule": THRESHOLD_RULE,
+        "fit_original_indices": sorted(
+            int(i) for i in train["original_index"].unique()
+        ),
+        "calibration_original_indices": sorted(
+            int(i) for i in validation["original_index"].unique()
+        ),
+        "supervision": "Clean/poison sample labels used for fitting; validation-clean labels used for threshold calibration.",
+    }
+    if compare_stages:
+        comparison = compare_feature_sets(
+            train,
+            validation,
+            args.classifier_seed,
+            target_clean_fpr,
+        )
+        comparison_metadata = dict(provenance)
+        comparison_metadata.update(
+            {
+                "evaluation_split": "validation",
+                "selection": "Diagnostic ranking only; choose --feature-set explicitly for the final run.",
+                "fpr_interpretation": "Every candidate uses the same empirical clean FPR cap; ties may be conservative.",
+                "train_original_images": int(train["original_index"].nunique()),
+                "validation_original_images": int(
+                    validation["original_index"].nunique()
+                ),
+                "test_evaluated": False,
+                "feature_sets": comparison[["feature_set", "feature_columns"]].to_dict(
+                    orient="records"
+                ),
+            }
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        comparison.to_csv(output_dir / "feature_comparison_validation.csv", index=False)
+        save_json(comparison_metadata, output_dir / "feature_comparison_metadata.json")
+        print(comparison.drop(columns=["feature_columns"]).to_string(index=False))
+        print("\nSaved validation-only comparison in:", output_dir)
+        return
+
+    scaler, classifier = fit_detector(train, columns, args.classifier_seed)
+    validation_scores = predict_scores(validation, columns, scaler, classifier)
+    threshold, validation_metrics = calibrate_validation(
+        validation,
+        validation_scores,
+        target_clean_fpr,
+    )
+    provenance.update(
+        {
+            "feature_set": feature_set,
+            "feature_columns": columns,
+            "threshold": threshold,
+        }
     )
 
-    metrics["features_path"] = str(
-        features_path.resolve()
+    bundle = dict(provenance, scaler=scaler, classifier=classifier)
+    bundle["validation"] = validation_metrics
+    bundle["score_interpretation"] = (
+        "Sample-level logistic score trained on clean/poison views, not a dataset posterior."
     )
-    metrics["features_sha256"] = sha256_file(
-        features_path
-    )
-    save_json(metrics, metrics_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = output_dir / "detector_bundle.joblib"
+    save_frozen_bundle(bundle, output_dir, filename="detector_bundle.joblib")
+    pd.DataFrame(
+        {"feature": columns, "standardized_coefficient": classifier.coef_[0]}
+    ).to_csv(output_dir / "coefficients.csv", index=False)
+    if fit_only:
+        metrics = dict(provenance, validation=validation_metrics, test_evaluated=False)
+        save_json(metrics, output_dir / "metrics.json")
+        print("Saved frozen sample detector without test evaluation:", bundle_path)
+        return
 
-    print(json.dumps(metrics, indent=2))
-    print("\nSaved:", bundle_path)
-    print("Saved:", metrics_path)
-    print("Saved:", predictions_path)
-    print("Saved:", coefficients_path)
+    metrics = evaluate_frozen_sample(features, bundle, feature_metadata, output_dir)
+    print(json.dumps(metrics["test"], indent=2))
+    print("\nSaved detector outputs in:", output_dir)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=("Train the clean supervised detector baseline without pair overlap, post-hoc deletion or test-set tuning."))
+    parser = argparse.ArgumentParser(
+        description="Train a paired supervised detector with validation-only calibration and stage comparisons."
+    )
     parser.add_argument("--features", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--classifier-seed", type=int, default=20260723)
-    parser.add_argument("--target-clean-fpr", type=float, default=0.05,)
+    parser.add_argument("--target-clean-fpr", type=float, default=0.05)
+    parser.add_argument(
+        "--feature-set",
+        choices=sorted(FEATURE_SETS),
+        default="all",
+        help="Choose a fixed feature group before inspecting test results.",
+    )
+    parser.add_argument(
+        "--compare-stages",
+        "--compare-features",
+        action="store_true",
+        help="Compare feature groups and individual stages/layers/tensors on validation, then exit.",
+    )
+    parser.add_argument(
+        "--fit-only",
+        action="store_true",
+        help="Freeze the chosen sample detector without evaluating test; use before dataset fitting.",
+    )
+    parser.add_argument(
+        "--evaluate-bundle",
+        help="Evaluate a frozen sample bundle on test views without fitting.",
+    )
     main(parser.parse_args())
