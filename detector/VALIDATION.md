@@ -1,5 +1,27 @@
 # 验证记录
 
+## 2026-09-20：严格无标签历史排序关系候选方法
+
+- 仅新增 `rank_reference.py`、`unsupervised_adapt.py` 和对应测试/说明。
+  有监督训练、数据集校准、原 `unsupervised.py`、原 pipeline 均未修改；旧产物不覆盖。
+- 本机 **114 项测试全部通过**。新增 18 项覆盖 tau 的逐对计算、精确 leave-one-out
+  jackknife 伪值、单调变换不变性及其攻击盲区、标签完全忽略、来源/身份校验、
+  常数输入缺失判定、max-p union 规则、逐任务留出、模型不变及源文件哈希不变。
+- 合成输入的实际 `python -B -m detector.unsupervised_adapt run` 命令通过。
+  测试确认 benchmark 读取前新模型已保存；dry-run 不写输出，旧目录拒绝覆盖。
+  正式实验将旧 MMD 与新方法放到相同批次上，不重新训练有监督模型。
+- Ruff 检查及新 Python 文件格式检查通过；28 个顶层和测试 Python 文件通过
+  Python 3.8 语法解析。这不是在服务器 Python 3.8 / torch 1.10 上的实际运行证明。
+- 另外执行 50 次独立合成统计检查：每次 2 个历史任务，各 128 行，incoming 150 行，
+  bootstrap=499，alpha=0.05。使用新测试文件的 `descriptors` 生成器，历史 seed
+  `10000 + 2*trial + task`，incoming seed `20000 + trial`，trial=0..49。
+  clean 告警 1/50；整批单调变换（norm *30+100、confidence/margin 立方）也为 1/50；
+  第一特征的潜变量符号反转导致的关系变化检出 50/50；仅替换前 15/150 行时检出
+  20/50。低比例敏感性不足如实保留，未据此选择新的参数。
+- 上述全部为合成方法检查，不能作为 CIFAR-100/BrainWash 实验指标。
+  严格无标签方案仍未在完整真实服务器特征上验证；不能声称解决原 clean 100% 告警，
+  或满足低投毒率检出要求。即使重用旧 test 有改善，仍需新的独立模型/攻击/任务验证。
+
 ## 2026-09-20：数据集误报校准与历史参考诊断
 
 - 本机 `python -B -m unittest discover -s detector/tests -q`：**96 项全部通过**。

@@ -6,6 +6,11 @@
 
 所有新代码、日志、数据、模型、报告限定在 `PROACT/detector/`。上游代码只读调用；输出检查目录边界并拒绝含符号链接的既有输出子树。历史 `results/` 保留不变，不代表当前协议的性能。
 
+严格无标签历史参考适配的新研究入口见
+[UNSUPERVISED_ADAPTATION.md](UNSUPERVISED_ADAPTATION.md)。
+该入口独立运行 `detector.unsupervised_adapt`，保留有监督结果和原 MMD 对照不变。
+它是待验证的排序关系检测候选方法，不代表已解决真实实验中的无监督失败。
+
 ## 2026-09-20：针对真实结果的修订及重评估
 
 旧实验的数据集级 clean FRR 为 19.1%，历史参考无标签检验对所有 clean bags
