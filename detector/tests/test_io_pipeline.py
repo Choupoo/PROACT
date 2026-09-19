@@ -85,6 +85,51 @@ class IOTests(unittest.TestCase):
             self.assertEqual(loader(b"storage"), "cpu_storage")
         self.assertEqual(remap.call_args.kwargs["map_location"], "cpu")
 
+    def test_legacy_torch_loader_omits_weights_only(self):
+        calls = []
+
+        def legacy_load(source, map_location=None, **pickle_load_args):
+            calls.append((source.read(), map_location, pickle_load_args))
+            if pickle_load_args:
+                raise TypeError("Unexpected keyword argument for pickle.load")
+            return "legacy_storage"
+
+        with mock.patch("detector.common.torch.load", new=legacy_load):
+            loader = _CPUUnpickler(io.BytesIO()).find_class(
+                "torch.storage", "_load_from_bytes"
+            )
+            self.assertEqual(loader(b"storage"), "legacy_storage")
+        self.assertEqual(calls, [(b"storage", "cpu", {})])
+
+    def test_modern_torch_loader_explicitly_disables_weights_only(self):
+        calls = []
+
+        def modern_load(source, map_location=None, *, weights_only=True):
+            calls.append((source.read(), map_location, weights_only))
+            return "modern_storage"
+
+        with mock.patch("detector.common.torch.load", new=modern_load):
+            loader = _CPUUnpickler(io.BytesIO()).find_class(
+                "torch.storage", "_load_from_bytes"
+            )
+            self.assertEqual(loader(b"storage"), "modern_storage")
+        self.assertEqual(calls, [(b"storage", "cpu", False)])
+
+    def test_tensor_loader_does_not_retry_unrelated_type_errors(self):
+        calls = []
+
+        def broken_load(source, map_location=None, *, weights_only=True):
+            calls.append(source.read())
+            raise TypeError("Corrupt trusted storage")
+
+        with mock.patch("detector.common.torch.load", new=broken_load):
+            loader = _CPUUnpickler(io.BytesIO()).find_class(
+                "torch.storage", "_load_from_bytes"
+            )
+            with self.assertRaisesRegex(TypeError, "Corrupt trusted storage"):
+                loader(b"broken")
+        self.assertEqual(calls, [b"broken"])
+
     def test_actual_ewc_fisher_buffer_naming_is_supported(self):
         model = make_model()
         state = dict(model.state_dict())

@@ -1,6 +1,7 @@
 """Artifact validation and shared utilities for the Task-9 detector."""
 
 import hashlib
+import inspect
 import io
 import json
 import math
@@ -69,9 +70,13 @@ class _CPUUnpickler(pickle.Unpickler):
 
     def find_class(self, module, name):
         if module == "torch.storage" and name == "_load_from_bytes":
-            return lambda value: torch.load(
-                io.BytesIO(value), map_location="cpu", weights_only=False
-            )
+            load_options = {"map_location": "cpu"}
+            # Older torch forwards unknown kwargs to pickle.load, which rejects
+            # weights_only. Inspect support rather than retrying deserialization
+            # after a TypeError that could indicate an unrelated corrupt file.
+            if "weights_only" in inspect.signature(torch.load).parameters:
+                load_options["weights_only"] = False
+            return lambda value: torch.load(io.BytesIO(value), **load_options)
         return super().find_class(module, name)
 
 
@@ -157,7 +162,10 @@ def validate_attack_artifact(artifact, expected_size=5000):
     raw_permutation = torch.as_tensor(artifact["rnd_idx_train"]).cpu()
     permutation = raw_permutation.long()
     if not torch.isfinite(raw_permutation).all() or not torch.equal(
-        raw_permutation, permutation
+        # Old torch.equal requires matching dtypes. Round-trip the integer
+        # conversion so fractional values still fail validation.
+        raw_permutation,
+        permutation.to(dtype=raw_permutation.dtype),
     ):
         raise ValueError("rnd_idx_train must contain finite integer indices.")
 

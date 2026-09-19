@@ -1,6 +1,24 @@
-# 验证记录（2026-09-15）
+# 验证记录
 
-## 已实际执行
+## 2026-09-19：旧版 PyTorch 兼容修复
+
+- 用户提供的服务器日志：Python 3.8.20、torch 1.10.1、torchvision 0.11.2，
+  CUDA 可用、依赖检查通过；原 78 项测试中 75 项通过、3 项报错。
+  两项报错来自 `weights_only` 不被旧版 `torch.load` 支持，另一项来自
+  `torch.equal` 跨 dtype 比较。这不是本机直接访问服务器得到的结果。
+- 修复 `common.py`：按 `torch.load` 的显式签名选择是否传 `weights_only=False`，
+  始终保留 CPU 映射；索引整数性检查使用同 dtype 的往返转换比较。
+- 新增 4 项测试，覆盖旧版加载接口、新版显式参数、无关 TypeError 不被重试吞掉，
+  以及旧版严格 dtype 比较下整数/小数/NaN/Inf 的校验。
+  新增测试在修复前实际复现加载和 dtype 错误；修复后本机 **82 项全部通过**。
+- 新增 `config.proact38.json`，仅更换 detector 运行目录，复用已有 PROACT 产物；
+  已验证该配置的 pipeline dry-run 正常生成全部命令。
+- 尚未在目标服务器的 Python 3.8 / torch 1.10 环境重新运行修复后的测试或真实实验。
+  本地旧接口替身回归通过，不等于该服务器完整流程已成功。
+
+## 2026-09-15：初始验证
+
+### 已实际执行
 
 - `python -B -m unittest discover -s detector/tests -q`：**78 项通过**。
 - Ruff 静态检查、格式检查通过；Git diff 空白检查通过。
@@ -13,7 +31,7 @@
 
 合成演示的报告位于 `work/cpu_demo_final/report.md`，开头明确标为人工合成。其任何 AUC、误报或检出率都不能作为真实 CIFAR-100/BrainWash 实验指标。演示中即使出现高误拒率也如实报告，不以“跑通”为由标记算法有效。
 
-## 本机环境与未完成的实证验证
+### 本机环境与未完成的实证验证
 
 实际测试解释器为 `/opt/miniconda3/bin/python3`，Python 3.12.7，torch 2.9.0、NumPy 1.26.4、pandas 2.3.3、scikit-learn 1.7.2。
 

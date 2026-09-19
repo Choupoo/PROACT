@@ -9,6 +9,7 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -400,6 +401,27 @@ class ArtifactIdentityTests(unittest.TestCase):
         self.artifact["rnd_idx_train"] = torch.tensor([2.5, 0, 1])
         with self.assertRaises(ValueError):
             validate_attack_artifact(self.artifact, expected_size=3)
+
+    def test_permutation_validation_supports_legacy_same_dtype_equality(self):
+        real_equal = torch.equal
+
+        def legacy_equal(left, right):
+            if left.dtype != right.dtype:
+                raise RuntimeError("Legacy torch.equal requires matching dtypes")
+            return real_equal(left, right)
+
+        with mock.patch("detector.common.torch.equal", new=legacy_equal):
+            for dtype in (torch.int32, torch.int64, torch.float32, torch.float64):
+                with self.subTest(valid_dtype=dtype):
+                    self.artifact["rnd_idx_train"] = torch.tensor(
+                        [2, 0, 1], dtype=dtype
+                    )
+                    validate_attack_artifact(self.artifact, expected_size=3)
+            for values in ([2.5, 0, 1], [float("nan"), 0, 1], [float("inf"), 0, 1]):
+                with self.subTest(invalid_values=values):
+                    self.artifact["rnd_idx_train"] = torch.tensor(values)
+                    with self.assertRaisesRegex(ValueError, "finite integer indices"):
+                        validate_attack_artifact(self.artifact, expected_size=3)
 
     def test_checkpoint_metadata_and_tensor_mismatches_are_rejected(self):
         for field in ("seed", "model"):

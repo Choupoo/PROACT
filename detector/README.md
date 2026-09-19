@@ -47,6 +47,33 @@ python -B -m detector.doctor --require-cuda
 
 依赖安装是你显式执行的环境操作；项目程序只写 detector。requirements 不强行替换现有 torch/CUDA。CPU demo 不导入 torchvision；真实 CIFAR 提取和上游训练需要兼容的 torchvision。`doctor` 区分数值依赖、torch、torchvision 导入和 CUDA 可用性。
 
+### 已有 Python 3.8 / PyTorch 1.10 实验环境
+
+服务器已完成 PROACT 训练时，不必为已知兼容问题重装环境或重跑 bootstrap。
+`common.py` 会检查 `torch.load` 是否支持 `weights_only`；旧版不传该参数，
+新版显式传 `False`，两者都将可信 pickle 中的 tensor storage 映射到 CPU。
+索引整数性检查采用同类型张量比较，兼容旧版 `torch.equal`，仍拒绝小数及非有限值。
+这不是安全反序列化沙箱，只能加载可信实验产物。
+
+同步修复后的代码及测试到服务器后，从 `PROACT` 目录执行：
+
+```bash
+python -B -m detector.doctor --require-cuda
+python -m pip check
+python -B -m unittest discover -s detector/tests -v
+python -B -c "from detector.common import load_pickle; load_pickle('detector/work/artifacts/victim/checkpoint.pkl'); print('Checkpoint loaded successfully')"
+python -B -u -m detector.pipeline --config detector/config.proact38.json
+```
+
+`config.proact38.json` 复用 `work/artifacts/` 中的模型、反演样本、攻击文件与数据，
+仅将 detector 输出改到新的 `work/full_v2_seed0_proact38/`；实验参数与默认配置一致。
+如果之前使用了自定义材料路径，请同步调整此配置；如果这个输出目录也已有其他版本
+运行记录，请改用另一个未使用的 `run_dir`。不要删除旧运行的环境记录以绕过哈希校验。
+
+`doctor` 的 `ready` 仅表示基础依赖检查通过，不保证所有代码路径或 GPU 实验成功。
+本地回归测试模拟了旧版接口行为，不等同于在服务器 Python 3.8 / torch 1.10 上
+完成真实全流程验证；仍需在目标环境运行上述检查和实验。
+
 ## 3. 没有实验材料：从零生成
 
 先查看命令，然后在 NVIDIA GPU 环境启动：
