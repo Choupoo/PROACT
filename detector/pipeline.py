@@ -26,6 +26,7 @@ DEFAULTS = {
     "permutations": 199,
     "alpha": 0.05,
     "target_clean_fpr": 0.05,
+    "dataset_decision_rule": "count_bound",
 }
 PATH_FIELDS = ("checkpoint", "artifact", "inversion_dir", "data_cwd", "run_dir")
 
@@ -54,6 +55,8 @@ def load_config(path):
         "all",
     }:
         raise ValueError("Unsupported feature_set.")
+    if config["dataset_decision_rule"] not in {"count_bound", "legacy_lr"}:
+        raise ValueError("Unsupported dataset_decision_rule.")
     if (
         isinstance(config["task_size"], bool)
         or not isinstance(config["task_size"], int)
@@ -181,6 +184,8 @@ def commands(config):
                 config["bags_per_rate"],
                 "--target-clean-frr",
                 config["target_clean_fpr"],
+                "--decision-rule",
+                config["dataset_decision_rule"],
             ],
         ),
         (
@@ -197,6 +202,21 @@ def commands(config):
                 config["alpha"],
                 "--permutations",
                 config["permutations"],
+            ],
+        ),
+        (
+            "fit",
+            "reference_audit",
+            "reference_audit",
+            [
+                "--bundle",
+                unsupervised,
+                "--features",
+                predicted,
+                "--task-size",
+                config["task_size"],
+                "--output",
+                root / "reference_audit.json",
             ],
         ),
         (

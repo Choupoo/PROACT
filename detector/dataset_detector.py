@@ -13,6 +13,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from detector.calibration import count_decision, fit_count_calibration
 from detector.common import save_json, sha256_file
 from detector.io_utils import (
     assert_compatible_provenance,
@@ -41,6 +42,7 @@ AGGREGATE_COLUMNS = [
     "score_max",
 ]
 DEFAULT_RATES = (0.0, 0.1, 0.25, 0.5, 1.0)
+DECISION_RULES = ("count_bound", "legacy_lr")
 DEPENDENCE_NOTE = (
     "Bags contain distinct original images internally, but repeated bags reuse "
     "a finite pool. Rates describe this simulation, not independent datasets "
@@ -191,6 +193,16 @@ def dataset_scores(bags, bundle):
     return bundle["classifier"].predict_proba(values)[:, 1]
 
 
+def task_decisions(bags, bundle, scores):
+    """Keep legacy LR scores visible, but explicitly identify the decision rule."""
+    if bundle.get("decision_rule", "legacy_lr") == "legacy_lr":
+        return scores >= bundle["threshold"], None
+    if bundle["decision_rule"] != "count_bound":
+        raise ValueError("Unsupported dataset decision rule.")
+    counts = np.rint(bags["suspicious_fraction"].to_numpy() * bundle["task_size"])
+    return count_decision(counts, bundle["count_calibration"])
+
+
 def fit_dataset_detector(
     features,
     sample_bundle,
@@ -204,9 +216,12 @@ def fit_dataset_detector(
     classifier_seed=20260726,
     evaluation_seed=20260727,
     rates=DEFAULT_RATES,
+    decision_rule="count_bound",
 ):
     """Fit on one reserve subpool and calibrate on a disjoint clean subpool."""
     validate_feature_table(features)
+    if decision_rule not in DECISION_RULES:
+        raise ValueError("Unsupported dataset decision rule.")
     provenance = feature_provenance(metadata)
     assert_compatible_provenance(sample_bundle["provenance"], provenance)
     seen = sample_seen_indices(sample_bundle)
@@ -269,7 +284,8 @@ def fit_dataset_detector(
     )
     classifier.fit(x_fit, labels)
     bundle = {
-        "kind": "supervised_dataset_detector_v1",
+        "kind": "supervised_dataset_detector_v2",
+        "decision_rule": decision_rule,
         "sample_bundle": sample_bundle,
         "provenance": provenance,
         "scaler": scaler,
@@ -298,8 +314,18 @@ def fit_dataset_detector(
     bundle["top_tail_threshold"] = select_clean_threshold(
         calibration_bags["top_tail_mean"].to_numpy(), target_clean_frr
     )
+    clean_alarms = (
+        calibration_pool["sample_poison_score"].to_numpy() >= sample_bundle["threshold"]
+    )
+    bundle["count_calibration"] = fit_count_calibration(
+        clean_alarms, task_size, target_clean_frr
+    )
+    primary_decisions, _ = task_decisions(calibration_bags, bundle, calibration_scores)
     report = {
-        "calibration_clean_frr": float(
+        "decision_rule": decision_rule,
+        "count_calibration": bundle["count_calibration"],
+        "calibration_clean_frr": float(np.mean(primary_decisions)),
+        "legacy_lr_calibration_clean_frr": float(
             np.mean(calibration_scores >= bundle["threshold"])
         ),
         "calibration_top_tail_clean_frr": float(
@@ -353,7 +379,10 @@ def evaluate_dataset_detector(features, bundle, metadata):
         )
         scores = dataset_scores(bags, bundle)
         bags["dataset_poison_score"] = scores
-        bags["rejected"] = scores >= bundle["threshold"]
+        bags["legacy_lr_rejected"] = scores >= bundle["threshold"]
+        bags["rejected"], tail_bounds = task_decisions(bags, bundle, scores)
+        if tail_bounds is not None:
+            bags["count_tail_bound"] = tail_bounds
         bags["top_tail_rejected"] = (
             bags["top_tail_mean"] >= bundle["top_tail_threshold"]
         )
@@ -367,6 +396,9 @@ def evaluate_dataset_detector(features, bundle, metadata):
                     "contamination_count": int(group["contamination_count"].iloc[0]),
                     "bags": int(len(group)),
                     "positive_rate": positive_rate,
+                    "legacy_lr_positive_rate": float(
+                        group["legacy_lr_rejected"].mean()
+                    ),
                     "metric": "clean_frr"
                     if rate == 0
                     else (
@@ -387,6 +419,8 @@ def evaluate_dataset_detector(features, bundle, metadata):
         pool["view"] == "random_control", "sample_poison_score"
     ].to_numpy()
     report = {
+        "decision_rule": bundle.get("decision_rule", "legacy_lr"),
+        "count_calibration": bundle.get("count_calibration"),
         "test_original_images": int(test["original_index"].nunique()),
         "sample_metrics": binary_metrics(
             supervised["detector_label"].to_numpy(), sample_scores, sample["threshold"]
@@ -424,10 +458,21 @@ def predict_dataset(features, bundle, metadata):
     )
     aggregates = aggregate_scores(scores, sample["threshold"], bundle["top_fraction"])
     score = float(dataset_scores(pd.DataFrame([aggregates]), bundle)[0])
+    decisions, tails = task_decisions(
+        pd.DataFrame([aggregates]), bundle, np.array([score])
+    )
+    rejected = bool(decisions[0])
     return {
         "dataset_poison_score": score,
-        "rejected": bool(score >= bundle["threshold"]),
-        "decision": "reject" if score >= bundle["threshold"] else "accept",
+        "score_used_for_primary_decision": bundle.get("decision_rule", "legacy_lr")
+        == "legacy_lr",
+        "decision_rule": bundle.get("decision_rule", "legacy_lr"),
+        "rejected": rejected,
+        "decision": "reject" if rejected else "accept",
+        "legacy_lr_rejected": bool(score >= bundle["threshold"]),
+        "count_calibration": bundle.get("count_calibration"),
+        "count_tail_bound": None if tails is None else float(tails[0]),
+        "suspicious_count": int(np.count_nonzero(scores >= sample["threshold"])),
         "threshold": bundle["threshold"],
         "top_tail_rejected": bool(
             aggregates["top_tail_mean"] >= bundle["top_tail_threshold"]
@@ -461,6 +506,7 @@ def main(args):
             bag_seed=args.bag_seed,
             classifier_seed=args.classifier_seed,
             evaluation_seed=args.evaluation_seed,
+            decision_rule=args.decision_rule,
         )
         bundle["sample_bundle_sha256"] = sha256_file(args.sample_bundle)
         bundle["features_sha256"] = sha256_file(args.features)
@@ -469,7 +515,10 @@ def main(args):
         save_json(report, output_dir / "fit_metrics.json")
     else:
         bundle = load_frozen_bundle(args.bundle)
-        if bundle.get("kind") != "supervised_dataset_detector_v1":
+        if bundle.get("kind") not in {
+            "supervised_dataset_detector_v1",
+            "supervised_dataset_detector_v2",
+        }:
             raise ValueError("Expected a frozen supervised dataset detector bundle.")
         if args.command == "evaluate":
             if metadata.get("origin_role") != "paired_benchmark":
@@ -499,6 +548,9 @@ def build_parser():
         subparser.add_argument("--output-dir", required=True)
         if command == "fit":
             subparser.add_argument("--sample-bundle", required=True)
+            subparser.add_argument(
+                "--decision-rule", choices=DECISION_RULES, default="count_bound"
+            )
             subparser.add_argument("--task-size", type=int, default=150)
             subparser.add_argument("--bags-per-rate", type=int, default=1000)
             subparser.add_argument("--top-fraction", type=float, default=0.1)

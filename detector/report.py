@@ -36,6 +36,11 @@ def build_report(run_dir):
             "**本报告来自人工合成特征，只验证代码链路，不是 CIFAR-100 / BrainWash 实验结果，不得用于论文或简历性能指标。**",
             "",
         ]
+    if config.get("revision_after_observed_test_results"):
+        lines += [
+            "**这是看过旧测试结果后修改方案的诊断性重评估，复用了旧测试原图。即使指标改善，也不是新的独立确认实验；后续需冻结方法并在新模型/攻击/任务上验证。**",
+            "",
+        ]
     lines += [
         "协议：`pretraining_full_v2`。模型在 incoming task 训练前固定；测试集不参与拟合、特征排序或阈值选择。",
         "",
@@ -98,18 +103,47 @@ def build_report(run_dir):
     else:
         lines += ["尚未执行冻结模型的测试集评估。", ""]
     lines += ["## 3. 有监督数据集级检测", ""]
+    dataset_metrics_path = root / "dataset_test" / "evaluation_metrics.json"
+    if dataset_metrics_path.exists():
+        dataset_metrics = json.loads(dataset_metrics_path.read_text())
+        rule = dataset_metrics.get("decision_rule", "legacy_lr")
+        lines += ["主判定规则：`{}`。".format(rule), ""]
+        if rule == "count_bound":
+            calibration = dataset_metrics["count_calibration"]
+            lines += [
+                "使用 {} 张独立干净校准原图（不是模拟 bags 数），观察到 {} 个样本级告警；样本误报率单侧上界为 {:.4%}。每批 {} 张，至少 {} 个样本告警才拒绝该批。".format(
+                    calibration["calibration_original_images"],
+                    calibration["calibration_sample_alarms"],
+                    calibration["sample_fpr_upper_bound"],
+                    calibration["task_size"],
+                    calibration["critical_suspicious_count"],
+                ),
+                "",
+                "误报预算分别分配给干净样本误报率估计和批次计数尾概率。条件是校准/新批次干净原图独立且具有相同告警概率；不保证任一固定测试池、任务迁移或相关样本上的误报率。",
+                "",
+                "`positive_rate` 是新计数规则的结果；`legacy_lr_positive_rate` 和 `top_tail_positive_rate` 保留原方法作为对照。LR 风险分数仍输出，但不再决定主判定。",
+                "",
+            ]
+            if not calibration["detection_possible_at_this_size"]:
+                lines += [
+                    "**当前校准信息不足，计数阈值超过批次大小，规则无法拒绝任何批次。低误报在此不代表有效检测，必须同时检查检出能力。**",
+                    "",
+                ]
     rates_path = root / "dataset_test" / "rates.csv"
     if rates_path.exists():
         rates = pd.read_csv(rates_path)
+        columns = [
+            "alternative_view",
+            "realized_rate",
+            "positive_rate",
+            "top_tail_positive_rate",
+        ]
+        if "legacy_lr_positive_rate" in rates:
+            columns.insert(3, "legacy_lr_positive_rate")
         lines += [
             _table(
                 rates,
-                [
-                    "alternative_view",
-                    "realized_rate",
-                    "positive_rate",
-                    "top_tail_positive_rate",
-                ],
+                columns,
             ),
             "",
         ]
@@ -129,6 +163,28 @@ def build_report(run_dir):
         "",
     ]
     unsupervised_path = root / "unsupervised_test.json"
+    audit_path = root / "reference_audit.json"
+    if audit_path.exists():
+        audit = json.loads(audit_path.read_text())
+        lines += [
+            "历史参考域诊断（仅 validation-clean）：`{}`；{} 个内部不重叠批次的原始分布告警率为 {:.2%}。".format(
+                audit["reference_domain_status"],
+                audit["disjoint_batches"],
+                audit["validation_clean_shift_alert_rate"],
+            ),
+            "",
+            "**历史参考路线只保留分布偏移诊断，投毒决策为 undetermined，部署动作是 abstain（交由人工复核），不是自动拒绝，也不是认定干净。少量验证批次不能证明部署可靠。**",
+            "",
+            _table(
+                pd.DataFrame(audit["feature_diagnostics"]).head(10),
+                [
+                    "feature",
+                    "absolute_median_shift_reference_scale_units",
+                    "fraction_outside_reference_clip",
+                ],
+            ),
+            "",
+        ]
     if unsupervised_path.exists():
         result = json.loads(unsupervised_path.read_text())
         lines += [
@@ -163,6 +219,7 @@ def build_report(run_dir):
         "## 方法依据",
         "",
         "分布检验采用 [MMD](https://jmlr.org/papers/v13/gretton12a.html) 的随机特征近似；[Random Fourier Features](https://papers.nips.cc/paper/2007/hash/013a006f03dbc5392effeb8f18fda755-Abstract.html) 用于降低重复置换的计算成本。这里只借用分布检验方法，不声称文献证明其能特异检测 BrainWash。",
+        "计数校准使用 [Clopper–Pearson 精确区间](https://docs.scipy.org/doc/scipy-1.15.3/reference/generated/scipy.stats._result_classes.BinomTestResult.proportion_ci.html) 的单侧上界和二项分布尾概率；须满足上述独立同分布条件。",
         "",
     ]
     return "\n".join(lines)

@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from detector import bootstrap
-from detector.common import _CPUUnpickler, load_pickle
+from detector.common import _CPUUnpickler, load_pickle, sha256_file
 from detector.demo import make_fixtures
 from detector.extract_features import validate_loaded_model_keys
 from detector.io_utils import (
@@ -25,6 +25,7 @@ from detector.io_utils import (
 )
 from detector.pipeline import commands, load_config
 from detector.report import build_report
+from detector import reassess
 from test_features import make_model
 
 
@@ -68,6 +69,49 @@ class IOTests(unittest.TestCase):
             output.write(b"corruption")
         with self.assertRaisesRegex(ValueError, "checksum"):
             load_frozen_bundle(path)
+
+    def test_feature_metadata_row_count_and_missing_values_are_rejected(self):
+        make_fixtures(self.root)
+        path = self.root / "features.csv"
+        meta_path = path.with_suffix(".metadata.json")
+        table, metadata = read_feature_table(path)
+        metadata["row_count"] = len(table) + 1
+        meta_path.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "row count"):
+            read_feature_table(path)
+        metadata["row_count"] = len(table)
+        table.loc[0, metadata["feature_columns"][0]] = np.nan
+        table.to_csv(path, index=False)
+        metadata["features_sha256"] = sha256_file(path)
+        meta_path.write_text(json.dumps(metadata))
+        with self.assertRaisesRegex(ValueError, "missing descriptor"):
+            read_feature_table(path)
+
+    def test_reassessment_uses_existing_features_and_freezes_before_evaluation(self):
+        config = load_config(DETECTOR_ROOT / "config.proact38.json")
+        source, destination = self.root / "source", self.root / "destination"
+        plan = reassess.build_plan(source, destination, config)
+        names = [name for name, _ in plan]
+        self.assertLess(names.index("dataset_fit"), names.index("dataset_evaluate"))
+        self.assertLess(
+            names.index("reference_audit"), names.index("unsupervised_evaluate")
+        )
+        for _, command in plan:
+            self.assertNotIn("detector.bootstrap", command)
+            self.assertNotIn("detector.extract_features", command)
+            if "--features" in command:
+                self.assertEqual(
+                    Path(command[command.index("--features") + 1]).parent, source
+                )
+        source.mkdir()
+        (source / "run_config.json").write_text(json.dumps(config))
+        with self.assertRaises(FileNotFoundError):
+            reassess.main(
+                argparse.Namespace(
+                    source_run=source, output_dir=destination, dry_run=False
+                )
+            )
+        self.assertFalse(destination.exists())
 
     def test_trusted_tensor_pickle_remaps_storage_to_cpu(self):
         path = self.root / "tensor.pkl"

@@ -17,7 +17,10 @@ def main(args):
     incoming = Path(args.input_npz).resolve()
     bundle = load_frozen_bundle(bundle_path)
     is_unsupervised = bundle.get("method") == METHOD
-    if not is_unsupervised and bundle.get("kind") != "supervised_dataset_detector_v1":
+    if not is_unsupervised and bundle.get("kind") not in {
+        "supervised_dataset_detector_v1",
+        "supervised_dataset_detector_v2",
+    }:
         raise ValueError(
             "Use a dataset_bundle.joblib or unsupervised_bundle.joblib, not a sample detector."
         )

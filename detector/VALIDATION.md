@@ -1,5 +1,24 @@
 # 验证记录
 
+## 2026-09-20：数据集误报校准与历史参考诊断
+
+- 本机 `python -B -m unittest discover -s detector/tests -q`：**96 项全部通过**。
+  新增覆盖计数校准的边界与误报预算、按原图而非重复 bags 计数、旧 bundle
+  兼容、测试集不影响拟合、validation-only 参考审计、CSV 完整性与重评估命令。
+- `demo --output-dir detector/work/cpu_demo_calibration_v2` 完整通过；
+  `reassess --source-run detector/work/cpu_demo_calibration_v2 --output-dir
+  detector/work/cpu_reassessment_v2` 的 dry-run 及实际执行均通过。
+  两次使用人工合成特征，只验证链路；报告明确标记，不是实际攻击性能结果。
+- Ruff 静态检查、Git diff 空白检查通过；25 个顶层及测试 Python 文件通过
+  Python 3.8 语法解析。本机仍为 Python 3.12 / torch 2.9，未在服务器旧环境重跑。
+- 新拟合模型使用 count_bound 主判定，保留 LR/top-tail 对照；旧模型保持原行为。
+  误报预算有独立同分布等适用条件，保守性可能降低低投毒率检出能力。
+- 历史 MMD 保留真实原始告警，新增参考域诊断与投毒判定 abstain；
+  没有把“拒绝给出投毒判断”当作误报改善，没有声称修复无标签检测能力。
+- 尚未对完整真实服务器产物重评估，不能宣称原 19.1% clean FRR 已下降，
+  或原无标签 100% 告警已解决。修改后复用旧测试集仅作诊断，仍需独立确认实验。
+- 全部代码及文档修改限定在 detector；旧实验结果未覆盖，未修改外部环境。
+
 ## 2026-09-19：旧版 PyTorch 兼容修复
 
 - 用户提供的服务器日志：Python 3.8.20、torch 1.10.1、torchvision 0.11.2，

@@ -88,6 +88,10 @@ def read_feature_table(path):
             "Feature CSV hash does not match its metadata: {}".format(path)
         )
     table = pd.read_csv(path)
+    if "row_count" in metadata and metadata["row_count"] != len(table):
+        raise ValueError(
+            "Feature CSV row count does not match extraction metadata: {}".format(path)
+        )
     columns = metadata.get("feature_columns")
     if (
         not isinstance(columns, list)
@@ -98,6 +102,10 @@ def read_feature_table(path):
     missing = set(columns) - set(table.columns)
     if missing:
         raise ValueError("Declared features are missing: {}".format(sorted(missing)))
+    if table[columns].isna().any().any():
+        raise ValueError(
+            "Feature CSV contains missing descriptor values: {}".format(path)
+        )
     return table, metadata
 
 

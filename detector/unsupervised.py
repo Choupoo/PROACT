@@ -390,6 +390,9 @@ def predict_dataset(bundle, features, metadata):
         {
             "method": METHOD,
             "decision_type": "dataset_distribution_shift",
+            "poisoning_decision": "undetermined",
+            "deployment_action": "abstain",
+            "abstention_reason": "Historical synthetic versus incoming real exchangeability is unverified. A shift alone cannot justify accepting or rejecting training data as poisoned.",
             "alpha": settings["alpha"],
             "shift_detected": bool(result["p_value"] <= settings["alpha"]),
             "reference_bank_samples": len(bundle["reference_bank_rff"]),
@@ -505,6 +508,8 @@ def evaluate_benchmark(
     return {
         "method": METHOD,
         "evaluation_split": "test",
+        "poisoning_decision_available": False,
+        "raw_shift_alerts_are_not_poisoning_decisions": True,
         "alpha": bundle["settings"]["alpha"],
         "task_size": task_size,
         "evaluation_seed": seed,

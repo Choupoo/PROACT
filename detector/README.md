@@ -6,6 +6,55 @@
 
 所有新代码、日志、数据、模型、报告限定在 `PROACT/detector/`。上游代码只读调用；输出检查目录边界并拒绝含符号链接的既有输出子树。历史 `results/` 保留不变，不代表当前协议的性能。
 
+## 2026-09-20：针对真实结果的修订及重评估
+
+旧实验的数据集级 clean FRR 为 19.1%，历史参考无标签检验对所有 clean bags
+也产生告警。代码修订不等于这些真实指标已经改善：必须重跑并同时检查误报和检出率。
+
+- 新拟合的数据集模型默认采用 `count_bound`：冻结样本检测器和样本阈值，
+  对独立 calibration 池的每张 clean 原图只计数一次，用单侧 Clopper–Pearson
+  上界估计样本误报概率，再以二项尾概率设置 incoming 数据集的可疑样本数阈值。
+  将目标错误预算等分给估计误差与检验尾部；重复抽取的 bags 不增加校准样本量。
+  该界要求校准与 incoming clean 原图独立、具有相同误报概率，不保证域偏移或
+  相关样本下的误报率。保守阈值可能损失低投毒率检出能力；无法检出时会明确报告。
+  计算依据见 [Clopper–Pearson 区间](https://docs.scipy.org/doc/scipy-1.15.3/reference/generated/scipy.stats._result_classes.BinomTestResult.proportion_ci.html)
+  和 [二项分布尾概率](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.binom.html)。
+- LR 风险分数和旧阈值作为对照保留，旧 bundle 仍按原 LR 规则预测。
+  随机扰动对照的高告警率不能由此宣称已经解决。
+- 新增 `reference_audit`，仅用 validation clean 数据诊断历史合成参考与新任务
+  特征的差异；不以 test 调整 MMD 阈值。保留原始 MMD 告警及其误报统计。
+  无标签预测明确返回 `poisoning_decision: undetermined`、`deployment_action: abstain`，
+  不能自动接受或拒绝数据。这是诊断和使用边界修正，不是无标签检测能力已恢复。
+- CSV 加载同时检查哈希、声明的行数和特征缺失值；不完整传输应重新获取原文件，
+  不能修改元数据或哈希绕过检查。
+
+同步整个更新后的 `detector` 代码到服务器，保留服务器已有 `work/` 产物。
+在原 tmux 会话也可以运行以下命令；先确认没有另一个实验正在使用同一输出目录：
+
+```bash
+conda activate proact38
+cd /home/p.zhang/PROACT
+python -B -m unittest discover -s detector/tests -q
+
+# 只验证输入并打印命令，不创建结果目录。
+python -B -m detector.reassess \
+  --source-run detector/work/full_v2_seed0_proact38 \
+  --output-dir detector/work/reassessment_count_v1 --dry-run
+
+# 复用已有特征和冻结模型，不重跑 PROACT、反演、攻击或 GPU 特征提取。
+python -B -u -m detector.reassess \
+  --source-run detector/work/full_v2_seed0_proact38 \
+  --output-dir detector/work/reassessment_count_v1
+```
+
+源目录必须包含完整的三份特征 CSV 及 metadata、sample/unsupervised 模型及校验文件、
+`run_config.json`；只有汇总报告不足以重评估。输出目录必须是全新目录，旧结果不覆盖。
+重点查看新目录内 `report.md`、`dataset/fit_metrics.json`、`dataset_test/rates.csv`、
+`reference_audit.json` 和 `unsupervised_test.json`。
+本次方案修订发生在观察旧 test 后，复用该 test 的结果只能作为诊断，不能当作独立确认；
+最终结论仍需要新的模型/攻击种子或独立数据验证。
+使用可信干净新任务参考的单类方案会改变方法假设，本次没有自动加入。
+
 ## 1. 教授要求与实现
 
 | 要求 | 实现 | 结果 |
@@ -14,7 +63,7 @@
 | 更细粒度范数、哪些层有区分力 | 参数张量/模块/五个 stage 的梯度范数 | `analysis/feature_comparison_validation.csv` |
 | 各历史任务参考方向、min/max/mean | 当前样本一个梯度，对比 Task 0–8 九个参考方向 | 特征 CSV、`*.references.pt` |
 | uncertainty / activation | entropy、confidence、target probability、margin、激活范数 | 固定 16 维特征 |
-| dataset-level detection | 聚合样本分数，独立拟合数据集 LR 和阈值；top-tail 简单基线 | `dataset_test/rates.csv` |
+| dataset-level detection | 独立 clean 原图计数校准；保留数据集 LR 和 top-tail 对照 | `dataset_test/rates.csv` |
 | 无新任务投毒标签 | 历史反演参考 + 伪标签特征 + RFF-MMD 置换检验 | `unsupervised_test.json` |
 | 可复现且说得清楚 | 原图级分区、固定种子、哈希、冻结模型、独立测试、随机扰动对照 | `run_config.json`、`report.md` |
 
@@ -266,7 +315,10 @@ model.eval 固定 BN，autograd.grad 求导，无优化器更新；前后核对�
 
 reserve 按原图等分为 500 dataset-fit / 500 dataset-calibration，与样本 train/validation/test 不重叠。每个模拟数据集默认 150 张不同原图，投毒比例 0/10/25/50/100%，记录实际整数投毒数量。聚合 top10%-mean、可疑比例、均值、标准差、中位数、75/90/95 分位数、最大值；在 fit 池拟合数据集 LR，用 calibration 池的纯 clean bags 校准阈值。另报告仅 top-tail mean 的简单基线。
 
-dataset_poison_score 是模拟混合分布下的分类风险分数，不是经过实际部署分布校准的投毒后验概率。
+上述 LR/top-tail 是保留的对照路线。新模型默认使用独立 calibration clean 原图的
+`count_bound` 判定，详见本页修订说明；可显式用 `--decision-rule legacy_lr` 拟合旧规则。
+`dataset_poison_score` 始终是模拟混合分布下的 LR 分类风险分数，不是经过实际部署
+分布校准的投毒后验概率，也不是 `count_bound` 的主要判定依据。
 
 ### 无标签路线
 

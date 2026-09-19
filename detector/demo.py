@@ -156,6 +156,7 @@ def run_demo(output_dir):
         "permutations": 39,
         "alpha": 0.05,
         "target_clean_fpr": 0.05,
+        "dataset_decision_rule": "count_bound",
     }
     save_json(config, root / "run_config.json")
     env = child_environment(root)

@@ -1,5 +1,6 @@
 """Tests of disjoint dataset pools, frozen inference, and bag-level accounting."""
 
+import copy
 import unittest
 from unittest import mock
 
@@ -174,6 +175,45 @@ class DatasetWorkflowTests(unittest.TestCase):
         self.sample["fit_original_indices"].append(100)
         with self.assertRaisesRegex(ValueError, "overlap"):
             self.fit_bundle()
+
+    def test_count_calibration_uses_unique_clean_images_not_number_of_bags(self):
+        original, _ = self.fit_bundle()
+        changed, _ = dataset.fit_dataset_detector(
+            self.features, self.sample, self.metadata, task_size=10, repeats=50
+        )
+        self.assertEqual(original["count_calibration"], changed["count_calibration"])
+        self.assertEqual(
+            original["count_calibration"]["calibration_original_images"], 20
+        )
+
+    def test_count_rule_ignores_test_values_and_calibration_poison_views(self):
+        original, _ = self.fit_bundle()
+        altered = self.features.copy()
+        mask = (altered["split"] == "test") | (
+            altered["original_index"].isin(original["calibration_original_indices"])
+            & (altered["view"] != "clean")
+        )
+        altered.loc[mask, BASE_FEATURE_COLUMNS] *= 100
+        self.features = altered
+        changed, _ = self.fit_bundle()
+        self.assertEqual(original["count_calibration"], changed["count_calibration"])
+        np.testing.assert_array_equal(
+            original["classifier"].coef_, changed["classifier"].coef_
+        )
+
+    def test_legacy_bundles_preserve_their_original_decision_rule(self):
+        bundle, _ = self.fit_bundle()
+        legacy = copy.deepcopy(bundle)
+        legacy.pop("decision_rule")
+        legacy.pop("count_calibration")
+        legacy["kind"] = "supervised_dataset_detector_v1"
+        report, predictions = dataset.evaluate_dataset_detector(
+            self.features, legacy, self.metadata
+        )
+        self.assertEqual(report["decision_rule"], "legacy_lr")
+        np.testing.assert_array_equal(
+            predictions["rejected"], predictions["legacy_lr_rejected"]
+        )
 
     def test_evaluation_rejects_seen_test_images(self):
         bundle, _ = self.fit_bundle()
