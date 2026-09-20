@@ -11,6 +11,10 @@
 该入口独立运行 `detector.unsupervised_adapt`，保留有监督结果和原 MMD 对照不变。
 它是待验证的排序关系检测候选方法，不代表已解决真实实验中的无监督失败。
 
+无监督部分收敛为三方法对照及独立模型/攻击复核的入口：
+[UNSUPERVISED_THESIS.md](UNSUPERVISED_THESIS.md)。新 `detector.unsupervised_study`
+只增加局部梯度形状候选方法与研究流程，不更改有监督结果，不自动宣布检测有效或毕设验收通过。
+
 ## 2026-09-20：针对真实结果的修订及重评估
 
 旧实验的数据集级 clean FRR 为 19.1%，历史参考无标签检验对所有 clean bags
