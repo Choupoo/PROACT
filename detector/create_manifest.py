@@ -1,5 +1,3 @@
-"""Assign original Task-9 images to fixed, class-stratified partitions."""
-
 import argparse
 from pathlib import Path
 
@@ -14,7 +12,6 @@ from detector.io_utils import ensure_output_path
 def create_manifest(
     targets, split_seed, train_per_class, validation_per_class, test_per_class
 ):
-    """Split original images before creating their clean/poison/random views."""
     targets = np.asarray(targets, dtype=np.int64)
 
     if targets.ndim != 1:
@@ -73,7 +70,6 @@ def create_manifest(
 
 
 def validate_manifest_table(manifest, targets):
-    """Check identity, labels and partition membership without trusting a CSV."""
     targets = np.asarray(targets, dtype=np.int64)
 
     expected_columns = {"original_index", "class_id", "split"}

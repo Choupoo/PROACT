@@ -143,7 +143,6 @@ def build_commands(args):
 
 
 def attack_effectiveness(clean_path, poison_path):
-    """Compute backward transfer from the actually observed accuracy matrices."""
     result = {}
     for label, path in (("clean", clean_path), ("poison", poison_path)):
         matrix = np.load(path, allow_pickle=False)

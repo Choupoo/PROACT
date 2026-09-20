@@ -1,13 +1,3 @@
-"""Count-based task decisions that account for finite clean calibration pools.
-
-A frozen sample rule defines Bernoulli alarms. An independent clean pool gives
-a one-sided Clopper-Pearson upper bound q_upper; a binomial tail then tests the
-incoming alarm count. Split the target error budget between estimation failure
-and the incoming tail. The bound requires independent, representative clean
-images with the same alarm probability; it is not a guarantee under domain
-shift, dependence, or adaptive reuse of a test set.
-"""
-
 import numpy as np
 from scipy.stats import beta, binom
 
@@ -23,7 +13,6 @@ def positive_integer(value, name):
 
 
 def fit_count_calibration(clean_alarms, task_size, alpha=0.05):
-    """Calibrate using each clean original ONCE, never simulated bag counts."""
     values = np.asarray(clean_alarms)
     task_size = positive_integer(task_size, "task_size")
     if values.ndim != 1 or not values.size or not np.isin(values, [0, 1]).all():

@@ -1,5 +1,3 @@
-"""Check dependencies in isolated processes; no imports can crash the parent."""
-
 import argparse
 import importlib.metadata
 import json

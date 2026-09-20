@@ -1,10 +1,3 @@
-"""Dataset-level supervised detection with disjoint original-image pools.
-
-The model's score is conditional on the simulated training mixtures. It is not
-an independently calibrated deployment posterior. Repeated bags reuse a finite
-image pool and therefore are not independent experimental datasets.
-"""
-
 import argparse
 import json
 
@@ -55,7 +48,6 @@ SCORE_NOTE = (
 
 
 def aggregate_scores(scores, sample_threshold, top_fraction=0.1):
-    """Summarize one dataset without using image class or poisoning labels."""
     values = np.asarray(scores, dtype=np.float64)
     if values.ndim != 1 or not values.size or not np.isfinite(values).all():
         raise ValueError("Sample scores must be a nonempty finite vector.")
@@ -85,7 +77,6 @@ def aggregate_scores(scores, sample_threshold, top_fraction=0.1):
 
 
 def validate_numeric_features(table, columns):
-    """Validate the frozen input schema without reading ground-truth labels."""
     if table.empty or table.columns.duplicated().any():
         raise ValueError("Feature table must be nonempty and have unique columns.")
     missing = set(columns) - set(table)
@@ -99,7 +90,6 @@ def validate_numeric_features(table, columns):
 
 
 def score_feature_pool(table, sample_bundle):
-    """Apply an already frozen sample model to feature rows."""
     columns = sample_bundle["feature_columns"]
     validate_numeric_features(table, columns)
     result = table[["original_index", "view"]].copy()
@@ -119,7 +109,6 @@ def simulate_bags(
     top_fraction=0.1,
     alternative="poison",
 ):
-    """Choose distinct original IDs first, then exactly one view per image."""
     if not isinstance(task_size, (int, np.integer)) or task_size <= 0:
         raise ValueError("task_size must be a positive integer.")
     if not isinstance(repeats, (int, np.integer)) or repeats <= 0:
@@ -173,7 +162,6 @@ def simulate_bags(
 
 
 def sample_seen_indices(bundle):
-    """Return every original used for sample fitting or threshold calibration."""
     required = {"fit_original_indices", "calibration_original_indices", "provenance"}
     if not required.issubset(bundle):
         raise ValueError(
@@ -194,7 +182,6 @@ def dataset_scores(bags, bundle):
 
 
 def task_decisions(bags, bundle, scores):
-    """Keep legacy LR scores visible, but explicitly identify the decision rule."""
     if bundle.get("decision_rule", "legacy_lr") == "legacy_lr":
         return scores >= bundle["threshold"], None
     if bundle["decision_rule"] != "count_bound":
@@ -218,7 +205,6 @@ def fit_dataset_detector(
     rates=DEFAULT_RATES,
     decision_rule="count_bound",
 ):
-    """Fit on one reserve subpool and calibrate on a disjoint clean subpool."""
     validate_feature_table(features)
     if decision_rule not in DECISION_RULES:
         raise ValueError("Unsupported dataset decision rule.")
@@ -350,7 +336,6 @@ def fit_dataset_detector(
 
 
 def evaluate_dataset_detector(features, bundle, metadata):
-    """Evaluate the frozen sample/dataset models once on held-out test originals."""
     validate_feature_table(features)
     assert_compatible_provenance(bundle["provenance"], feature_provenance(metadata))
     test = features.loc[features["split"] == "test"]
