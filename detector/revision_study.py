@@ -33,15 +33,22 @@ def _inputs(paths):
 
 
 class Run:
-    def __init__(self, root, args, hashes):
+    def __init__(
+        self,
+        root,
+        args,
+        hashes,
+        protocol="detector_revision_shape_v1",
+        evaluation_role="exploratory_reused_test_after_revision",
+    ):
         self.root, self.hashes = root, hashes
         self.state = {"status": "running", "steps": {}}
         root.mkdir(parents=True)
         save_json(
             {
-                "protocol": "detector_revision_shape_v1",
+                "protocol": protocol,
                 "command": vars(args),
-                "evaluation_role": "exploratory_reused_test_after_revision",
+                "evaluation_role": evaluation_role,
                 "target_used_for_fitting_or_calibration": False,
                 "input_sha256": hashes,
                 "source_code_sha256": {
@@ -106,9 +113,18 @@ def run_supervised(args):
         for task in (args.source_task, args.target_task)
     }
     hashes = _inputs(files.values())
+    policies = getattr(args, "negative_policies", ["clean_only"])
+    if (
+        not policies
+        or len(set(policies)) != len(policies)
+        or not set(policies).issubset(supervised.NEGATIVE_POLICIES)
+    ):
+        raise ValueError("Specify distinct registered negative policies.")
     if args.dry_run:
         print(
-            "Complete feature files found. Will fit portable, extended and shape on source only; no output written."
+            "Complete feature files found. Will fit portable, extended and shape on source only; negative policies: {}. No output written.".format(
+                policies
+            )
         )
         return
     run = Run(root, args, hashes)
@@ -124,12 +140,21 @@ def run_supervised(args):
             ):
                 raise ValueError("Source metadata differs from declared task/seed.")
             bundles = {}
-            for name in ("portable", "extended", "shape"):
+            variants = [
+                (feature, policy)
+                for feature in ("portable", "extended", "shape")
+                for policy in policies
+            ]
+            for feature, policy in variants:
+                name = (
+                    feature if policies == ["clean_only"] else feature + "__" + policy
+                )
                 bundle = supervised.fit_source(
                     source_table,
                     source_meta,
-                    feature_set=name,
+                    feature_set=feature,
                     task_size=args.task_size,
+                    negative_policy=policy,
                 )
                 bundle["input_file_sha256"] = source_meta["features_sha256"]
                 bundles[name] = bundle
@@ -143,6 +168,18 @@ def run_supervised(args):
                     },
                     destination / "fit_metrics.json",
                 )
+                if getattr(args, "explanations", False):
+                    from detector.explain_detector import explain
+
+                    explanation = root / ("seed" + str(seed)) / ("explain_" + name)
+                    explanation.mkdir(parents=True)
+                    explain(
+                        source_table,
+                        source_meta,
+                        bundle,
+                        explanation,
+                        split="validation",
+                    )
         # Source models are persisted before loading any target benchmark values.
         for task in (args.source_task, args.target_task):
             with run.stage("seed{}_evaluate_task{}".format(seed, task)):
@@ -185,11 +222,21 @@ def run_supervised(args):
                             seed=seed,
                             task=task,
                             feature_set=name,
+                            negative_policy=bundle.get("negative_policy", "clean_only"),
+                            raw_feature_set=bundle["feature_set"],
+                            replication_identity={
+                                "checkpoint": metadata["checkpoint_sha256"],
+                                "inversions": metadata["inversion_sha256"],
+                                "attack": metadata.get("input_sha256", {}).get(
+                                    "attack"
+                                ),
+                            },
                             synthetic=report["synthetic"],
                             sample_metrics=report["sample_metrics"],
                             random_control_sample_alert_rate=report[
                                 "random_control_sample_alert_rate"
                             ],
+                            poison_vs_random_roc_auc=report["poison_vs_random_roc_auc"],
                             dataset_results=report["dataset_results"],
                         )
                     )
@@ -207,8 +254,8 @@ def run_supervised(args):
             "",
             "Shape uses per-image stage L2 normalization and discards magnitude. No target calibration or automatic model selection.",
             "",
-            "| Seed | Task | Features | Synthetic | AUC | Clean FPR | Poison TPR | Clean bag alerts |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| Seed | Task | Variant | Synthetic | Clean/poison AUC | Clean FPR | Poison TPR | Random sample alerts | Poison/random AUC | Clean bag alerts |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for row in summaries:
             sample = row["sample_metrics"]
@@ -218,7 +265,7 @@ def run_supervised(args):
                 if r["alternative"] == "poison" and r["requested_rate"] == 0
             )
             lines.append(
-                "| {} | {} | {} | {} | {:.4f} | {:.2%} | {:.2%} | {:.2%} |".format(
+                "| {} | {} | {} | {} | {:.4f} | {:.2%} | {:.2%} | {:.2%} | {:.4f} | {:.2%} |".format(
                     row["seed"],
                     row["task"],
                     row["feature_set"],
@@ -226,6 +273,8 @@ def run_supervised(args):
                     sample["roc_auc"],
                     sample["clean_fpr"],
                     sample["poison_tpr"],
+                    row["random_control_sample_alert_rate"],
+                    row["poison_vs_random_roc_auc"],
                     clean,
                 )
             )
@@ -409,6 +458,17 @@ def build_parser():
             p.add_argument("--seeds", type=int, nargs="+", default=[3, 4])
             p.add_argument("--source-task", type=int, default=1)
             p.add_argument("--target-task", type=int, default=9)
+            p.add_argument(
+                "--negative-policies",
+                nargs="+",
+                choices=supervised.NEGATIVE_POLICIES,
+                default=["clean_only"],
+            )
+            p.add_argument(
+                "--explanations",
+                action="store_true",
+                help="Explain each frozen model on source validation using its actual training views.",
+            )
     return parser
 
 

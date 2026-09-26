@@ -46,6 +46,7 @@ SHAPE_COLUMNS = [
     name.replace("grad_norm_", "grad_shape_") for name in STAGE_GRAD_FEATURE_COLUMNS
 ]
 EXPERIMENTAL_FEATURE_GROUPS = {"shape": SHAPE_COLUMNS}
+NEGATIVE_POLICIES = ("clean_only", "clean_and_random")
 RATES = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
 
 
@@ -105,6 +106,7 @@ def fit_source(
     task_size=150,
     alpha=0.05,
     classifier_seed=20260924,
+    negative_policy="clean_only",
 ):
     validate_table(table, metadata)
     groups = dict(FEATURE_GROUPS, **EXPERIMENTAL_FEATURE_GROUPS)
@@ -115,7 +117,27 @@ def fit_source(
     supervised = table.loc[table.view.isin(["clean", "poison"])]
     train = supervised.loc[supervised.split == "train"]
     validation = supervised.loc[supervised.split == "validation"]
-    scaler, classifier = fit_detector(train, columns, classifier_seed)
+    if negative_policy not in NEGATIVE_POLICIES:
+        raise ValueError("Unknown negative-control policy.")
+    weights = None
+    train_views = ["clean", "poison"]
+    view_weights = {"clean": 1.0, "poison": 1.0}
+    if negative_policy == "clean_and_random":
+        train_views = ["clean", "random_control", "poison"]
+        train = table.loc[
+            (table.split == "train") & table.view.isin(train_views)
+        ].copy()
+        train.loc[train.view == "random_control", "detector_label"] = 0
+        # Keep total positive/negative loss weight and effective weight per
+        # original identical to the baseline; the two negative views share weight.
+        view_weights = {"clean": 0.5, "random_control": 0.5, "poison": 1.0}
+        weights = train.view.map(view_weights).to_numpy()
+    if weights is None:
+        scaler, classifier = fit_detector(train, columns, classifier_seed)
+    else:
+        scaler, classifier = fit_detector(
+            train, columns, classifier_seed, sample_weight=weights
+        )
     validation_scores = predict_scores(validation, columns, scaler, classifier)
     threshold = select_clean_threshold(
         validation_scores[validation.detector_label.to_numpy() == 0], alpha
@@ -127,6 +149,10 @@ def fit_source(
     bundle = {
         "kind": TRANSFER_PROTOCOL,
         "feature_set": feature_set,
+        "negative_policy": negative_policy,
+        "fit_views": train_views,
+        "training_view_weights": view_weights,
+        "preprocessing_weighting": "StandardScaler fits training views with equal row weights; classifier uses training_view_weights.",
         "feature_columns": columns,
         "scaler": scaler,
         "classifier": classifier,
@@ -162,6 +188,10 @@ def fit_source(
         "supervision": "Source clean/attack labels; source validation-clean threshold; source reserve-clean count calibration.",
         "score_interpretation": "Logistic sample score, not calibrated deployment poisoning probability.",
     }
+    if negative_policy == "clean_and_random":
+        bundle["supervision"] = (
+            "Source train clean/random-control=0, BrainWash=1; source validation-clean threshold and reserve-clean count calibration. Random control is a known non-BrainWash perturbation, not proven harmless data."
+        )
     if feature_set == "shape":
         bundle.update(
             raw_feature_columns=list(STAGE_GRAD_FEATURE_COLUMNS),
@@ -271,6 +301,14 @@ def evaluate(
         "protocol": TRANSFER_PROTOCOL,
         "feature_set": bundle["feature_set"],
         "feature_transform": bundle.get("feature_transform", "identity"),
+        "negative_policy": bundle.get("negative_policy", "clean_only"),
+        "poison_vs_random_roc_auc": binary_metrics(
+            (predictions.loc[predictions.view != "clean", "view"] == "poison").astype(
+                int
+            ),
+            scores[predictions.view != "clean"],
+            threshold,
+        )["roc_auc"],
         "source_task_index": source["task_index"],
         "evaluation_task_index": metadata["task_index"],
         "source_control": source_control,
@@ -393,6 +431,7 @@ def main(args):
             feature_set=args.feature_set,
             task_size=args.task_size,
             alpha=args.alpha,
+            negative_policy=getattr(args, "negative_policy", "clean_only"),
         )
         bundle["input_file_sha256"] = sha256_file(args.features)
         output.mkdir(parents=True)
@@ -435,6 +474,9 @@ def build_parser():
             )
             p.add_argument("--task-size", type=int, default=150)
             p.add_argument("--alpha", type=float, default=0.05)
+            p.add_argument(
+                "--negative-policy", choices=NEGATIVE_POLICIES, default="clean_only"
+            )
         else:
             p.add_argument("--bundle", required=True)
             p.add_argument("--source-control", action="store_true")

@@ -1,5 +1,12 @@
 # 毕设 Detector：完整研究流程与运行指南
 
+## 毕设收尾入口
+
+源任务随机扰动负类对照、固定 Rank 跨种子复核和论文主表汇总见
+[THESIS_CLOSEOUT.md](THESIS_CLOSEOUT.md)，可执行 `bash detector/run_thesis_closeout.sh`。
+需要服务器原完整特征；不重新训练 PROACT，不使用可信目标 clean 校准数据。
+写作框架及已经证实/尚未证实的结论见 [THESIS_WRITEUP.md](THESIS_WRITEUP.md)。
+
 ## 2026-09-26：监督迁移与严格无监督的归一化对照
 
 新增显式入口 `detector.revision_study`，复用已有 CSV 比较有监督梯度形状模型，

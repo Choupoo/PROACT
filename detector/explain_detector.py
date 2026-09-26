@@ -75,6 +75,10 @@ def feature_family(name):
 
 def explain(table, metadata, bundle, output, split="validation", ablations=False):
     validate_feature_table(table)
+    if bundle.get("negative_policy", "clean_only") != "clean_only" and ablations:
+        raise ValueError(
+            "Legacy ablations omit random-control negatives; use the registered negative-policy comparison."
+        )
     if bundle.get("feature_set") == "shape" and ablations:
         raise ValueError(
             "Legacy raw-feature ablations do not apply to the shape model."
@@ -88,7 +92,8 @@ def explain(table, metadata, bundle, output, split="validation", ablations=False
         )
     fit_ids = set(bundle["fit_original_indices"])
     background = table.loc[
-        table.original_index.isin(fit_ids) & table.view.isin(["clean", "poison"])
+        table.original_index.isin(fit_ids)
+        & table.view.isin(bundle.get("fit_views", ["clean", "poison"]))
     ]
     if set(background.original_index) != fit_ids or set(background.split) != {"train"}:
         raise ValueError(
@@ -201,6 +206,8 @@ def explain(table, metadata, bundle, output, split="validation", ablations=False
         "source": SHAP_SOURCE,
         "test_used_for_selection": False,
         "feature_columns": columns,
+        "negative_policy": bundle.get("negative_policy", "clean_only"),
+        "background_views": bundle.get("fit_views", ["clean", "poison"]),
         "examples": examples,
         "synthetic": bool(metadata.get("synthetic", False)),
         "limitations": "Marginal/interventional attribution ignores conditional feature dependence; correlated gradient features may share or substitute importance. Not causal, not probability contributions.",

@@ -232,7 +232,7 @@ def binary_metrics(y_true, probabilities, threshold):
     }
 
 
-def fit_detector(train, columns, classifier_seed):
+def fit_detector(train, columns, classifier_seed, sample_weight=None):
     """Fit scaling and logistic regression using training rows only."""
     scaler = StandardScaler()
     x_train = scaler.fit_transform(train[columns].to_numpy(dtype=np.float64))
@@ -243,7 +243,20 @@ def fit_detector(train, columns, classifier_seed):
         max_iter=2000,
         random_state=int(classifier_seed),
     )
-    classifier.fit(x_train, train["detector_label"].to_numpy(dtype=np.int64))
+    labels = train["detector_label"].to_numpy(dtype=np.int64)
+    if sample_weight is None:
+        classifier.fit(x_train, labels)
+    else:
+        weights = np.asarray(sample_weight, dtype=float)
+        if (
+            weights.shape != (len(train),)
+            or not np.isfinite(weights).all()
+            or (weights <= 0).any()
+        ):
+            raise ValueError(
+                "Training weights must be positive, finite and row-aligned."
+            )
+        classifier.fit(x_train, labels, sample_weight=weights)
     return scaler, classifier
 
 
