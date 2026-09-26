@@ -40,7 +40,29 @@ FEATURE_GROUPS = {
     + ["activation_norm_l2"],
     "extended": list(FEATURE_COLUMNS),
 }
+# Opt-in research revision; the original registered pipeline still runs only
+# FEATURE_GROUPS. Do not silently add a method to an existing experiment.
+SHAPE_COLUMNS = [
+    name.replace("grad_norm_", "grad_shape_") for name in STAGE_GRAD_FEATURE_COLUMNS
+]
+EXPERIMENTAL_FEATURE_GROUPS = {"shape": SHAPE_COLUMNS}
 RATES = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
+
+
+def prepare_features(table, feature_set):
+    """Deterministic per-image transform: no dataset statistics or labels."""
+    if feature_set != "shape":
+        return table
+    from detector.local_reference import shapes
+
+    values, valid = shapes(table)
+    if not valid.all():
+        raise ValueError(
+            "Zero-gradient rows have undefined shape; cannot classify them as clean."
+        )
+    result = table.copy()
+    result[SHAPE_COLUMNS] = values
+    return result
 
 
 def fresh_output(path):
@@ -85,9 +107,11 @@ def fit_source(
     classifier_seed=20260924,
 ):
     validate_table(table, metadata)
-    if feature_set not in FEATURE_GROUPS:
+    groups = dict(FEATURE_GROUPS, **EXPERIMENTAL_FEATURE_GROUPS)
+    if feature_set not in groups:
         raise ValueError("Unknown registered feature set.")
-    columns = FEATURE_GROUPS[feature_set]
+    columns = groups[feature_set]
+    table = prepare_features(table, feature_set)
     supervised = table.loc[table.view.isin(["clean", "poison"])]
     train = supervised.loc[supervised.split == "train"]
     validation = supervised.loc[supervised.split == "validation"]
@@ -138,6 +162,13 @@ def fit_source(
         "supervision": "Source clean/attack labels; source validation-clean threshold; source reserve-clean count calibration.",
         "score_interpretation": "Logistic sample score, not calibrated deployment poisoning probability.",
     }
+    if feature_set == "shape":
+        bundle.update(
+            raw_feature_columns=list(STAGE_GRAD_FEATURE_COLUMNS),
+            feature_transform="per_sample_stage_l2_v1",
+            revision_role="exploratory_after_transfer_v1",
+            transformation_limit="Ignores overall gradient magnitude; does not guarantee target FPR or preserve attack signal.",
+        )
     return bundle
 
 
@@ -165,7 +196,17 @@ def evaluate(
             "target_used_for_fitting_or_calibration": False,
         }
     else:
-        check = assert_transfer(source, metadata, bundle["feature_columns"])
+        check = assert_transfer(
+            source,
+            metadata,
+            bundle.get("raw_feature_columns", bundle["feature_columns"]),
+        )
+    if (
+        bundle["feature_set"] == "shape"
+        and bundle.get("feature_transform") != "per_sample_stage_l2_v1"
+    ):
+        raise ValueError("Missing or unsupported frozen shape transform.")
+    table = prepare_features(table, bundle["feature_set"])
     test = table.loc[table.split == "test"].copy()
     if source_control:
         seen = set(
@@ -229,6 +270,7 @@ def evaluate(
     report = {
         "protocol": TRANSFER_PROTOCOL,
         "feature_set": bundle["feature_set"],
+        "feature_transform": bundle.get("feature_transform", "identity"),
         "source_task_index": source["task_index"],
         "evaluation_task_index": metadata["task_index"],
         "source_control": source_control,
@@ -386,7 +428,11 @@ def build_parser():
         p.add_argument("--features", required=True)
         p.add_argument("--output-dir", required=True)
         if name == "fit":
-            p.add_argument("--feature-set", choices=FEATURE_GROUPS, default="portable")
+            p.add_argument(
+                "--feature-set",
+                choices=list(FEATURE_GROUPS) + list(EXPERIMENTAL_FEATURE_GROUPS),
+                default="portable",
+            )
             p.add_argument("--task-size", type=int, default=150)
             p.add_argument("--alpha", type=float, default=0.05)
         else:

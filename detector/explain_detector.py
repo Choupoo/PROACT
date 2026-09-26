@@ -20,7 +20,7 @@ from detector.io_utils import (
     read_feature_table,
 )
 from detector.train_detector import compare_feature_sets, validate_feature_table
-from detector.transfer_detector import fresh_output
+from detector.transfer_detector import fresh_output, prepare_features
 
 SHAP_SOURCE = (
     "https://shap.readthedocs.io/en/latest/generated/shap.LinearExplainer.html"
@@ -28,6 +28,8 @@ SHAP_SOURCE = (
 
 
 def linear_shap(bundle, background, samples):
+    background = prepare_features(background, bundle.get("feature_set"))
+    samples = prepare_features(samples, bundle.get("feature_set"))
     columns = bundle["feature_columns"]
     classifier, scaler = bundle["classifier"], bundle["scaler"]
     if list(classifier.classes_) != [0, 1] or classifier.coef_.shape != (
@@ -53,6 +55,8 @@ def linear_shap(bundle, background, samples):
 
 
 def feature_family(name):
+    if name.startswith("grad_shape_stage_"):
+        return name[len("grad_shape_stage_") :]
     if name.startswith("grad_norm_stage_"):
         return name[len("grad_norm_stage_") :]
     if name.startswith(("grad_norm_param__", "grad_norm_layer__")):
@@ -71,6 +75,11 @@ def feature_family(name):
 
 def explain(table, metadata, bundle, output, split="validation", ablations=False):
     validate_feature_table(table)
+    if bundle.get("feature_set") == "shape" and ablations:
+        raise ValueError(
+            "Legacy raw-feature ablations do not apply to the shape model."
+        )
+    table = prepare_features(table, bundle.get("feature_set"))
     assert_compatible_provenance(bundle["provenance"], feature_provenance(metadata))
     expected_hash = bundle.get("features_sha256", bundle.get("input_file_sha256"))
     if expected_hash is not None and expected_hash != metadata["features_sha256"]:
