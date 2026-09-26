@@ -1,5 +1,20 @@
 # 验证记录
 
+## 2026-09-26：梯度粒度受控补充实验
+
+- 新增 global / stage / layer / named parameter tensor 四种粒度，分别比较仅梯度与
+  加入同一组 uncertainty/activation 的模型。训练、验证校准、reserve 计数校准和
+  Task 1 → Task 9 测试规则固定，默认 seed3/4，随机扰动仅用于评估。
+- 本机全量 unittest **169 项通过**（104.657 秒）。新增 5 项覆盖源 schema 冻结、
+  缺少细粒度特征/混入 head 的拒绝、测试及随机对照隔离、目标缺列拒绝，以及
+  八组 × 两 seed × 两任务的实际 CLI 合成流程、SHAP、配对差值和输入哈希保留。
+- Ruff 全目录、Git diff 空白与 bash 语法检查通过；46 个 Python 文件通过
+  Python 3.8 语法解析。测试仍在本机 Python 3.12 执行，不代替服务器 3.8 实测。
+- 本机没有原始完整特征 CSV，真实逐参数性能对照尚未运行。服务器命令和回传
+  文件见 [GRANULARITY_STUDY.md](GRANULARITY_STUDY.md)。只有实际结果才能回答
+  更细粒度是否提升性能；professor_update.md 将在实际实验完成后生成，未发送邮件。
+- 所有改动限于 detector；原有无监督方法及既有实验产物未修改。
+
 ## 2026-09-26：毕设收尾实验与固定方法跨运行复核
 
 - 全量 unittest **164 项通过**（84.264 秒），执行环境为本机 Python 3.12，

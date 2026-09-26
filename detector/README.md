@@ -1,5 +1,11 @@
 # 毕设 Detector：完整研究流程与运行指南
 
+## 梯度粒度补充实验
+
+只补教授提出的 global / stage / layer / parameter-tensor 范数受控对照，运行
+`bash detector/run_granularity.sh`。复用原 Task 1/9 特征，生成多 seed 指标、相对
+stage 的配对差值、SHAP 与英文教授汇报草稿。见 [GRANULARITY_STUDY.md](GRANULARITY_STUDY.md)。
+
 ## 毕设收尾入口
 
 源任务随机扰动负类对照、固定 Rank 跨种子复核和论文主表汇总见

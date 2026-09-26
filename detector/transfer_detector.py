@@ -46,8 +46,61 @@ SHAPE_COLUMNS = [
     name.replace("grad_norm_", "grad_shape_") for name in STAGE_GRAD_FEATURE_COLUMNS
 ]
 EXPERIMENTAL_FEATURE_GROUPS = {"shape": SHAPE_COLUMNS}
+GRANULARITY_GROUPS = tuple(
+    "norm_" + level + suffix
+    for suffix in ("", "_context")
+    for level in ("global", "stage", "layer", "parameter")
+)
+CONTEXT_COLUMNS = list(UNCERTAINTY_FEATURE_COLUMNS) + ["activation_norm_l2"]
 NEGATIVE_POLICIES = ("clean_only", "clean_and_random")
 RATES = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
+
+
+def registered_feature_sets():
+    return (
+        list(FEATURE_GROUPS)
+        + list(EXPERIMENTAL_FEATURE_GROUPS)
+        + list(GRANULARITY_GROUPS)
+    )
+
+
+def resolve_feature_columns(table, metadata, feature_set):
+    """Resolve granularity from source schema only, never from target metrics."""
+    groups = dict(FEATURE_GROUPS, **EXPERIMENTAL_FEATURE_GROUPS)
+    if feature_set in groups:
+        return list(groups[feature_set])
+    if feature_set not in GRANULARITY_GROUPS:
+        raise ValueError("Unknown registered feature set.")
+    level = feature_set.split("_")[1]
+    if level == "global":
+        columns = ["grad_norm_l2"]
+    elif level == "stage":
+        columns = list(STAGE_GRAD_FEATURE_COLUMNS)
+    else:
+        prefix = "grad_norm_{}__".format("param" if level == "parameter" else "layer")
+        columns = sorted(c for c in table.columns if c.startswith(prefix))
+        declared = sorted(
+            c for c in metadata.get("feature_columns", []) if c.startswith(prefix)
+        )
+        if not columns or columns != declared:
+            raise ValueError(
+                "Missing or inconsistent {} gradient schema in source features/metadata.".format(
+                    level
+                )
+            )
+        if any(
+            not c[len(prefix) :]
+            or c[len(prefix) :].split(".")[0] in ("head", "heads", "fc", "classifier")
+            for c in columns
+        ):
+            raise ValueError("Granularity comparison requires backbone norms only.")
+    if feature_set.endswith("_context"):
+        columns += CONTEXT_COLUMNS
+    if not set(columns).issubset(metadata.get("feature_columns", [])):
+        raise ValueError("Granularity columns must be declared in source metadata.")
+    if (table[columns].filter(like="grad_norm_") < 0).any().any():
+        raise ValueError("Gradient norms must be nonnegative.")
+    return columns
 
 
 def prepare_features(table, feature_set):
@@ -109,10 +162,7 @@ def fit_source(
     negative_policy="clean_only",
 ):
     validate_table(table, metadata)
-    groups = dict(FEATURE_GROUPS, **EXPERIMENTAL_FEATURE_GROUPS)
-    if feature_set not in groups:
-        raise ValueError("Unknown registered feature set.")
-    columns = groups[feature_set]
+    columns = resolve_feature_columns(table, metadata, feature_set)
     table = prepare_features(table, feature_set)
     supervised = table.loc[table.view.isin(["clean", "poison"])]
     train = supervised.loc[supervised.split == "train"]
@@ -469,7 +519,7 @@ def build_parser():
         if name == "fit":
             p.add_argument(
                 "--feature-set",
-                choices=list(FEATURE_GROUPS) + list(EXPERIMENTAL_FEATURE_GROUPS),
+                choices=registered_feature_sets(),
                 default="portable",
             )
             p.add_argument("--task-size", type=int, default=150)

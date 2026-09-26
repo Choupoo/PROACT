@@ -93,7 +93,7 @@ class Run:
         print("Saved:", self.root, flush=True)
 
 
-def run_supervised(args):
+def run_supervised(args, *, finalize=None, protocol="detector_revision_shape_v1"):
     source = Path(args.source_run).resolve()
     root = unsupervised_study.fresh_output(args.output_dir, source)
     if not args.seeds or len(set(args.seeds)) != len(args.seeds):
@@ -114,6 +114,13 @@ def run_supervised(args):
     }
     hashes = _inputs(files.values())
     policies = getattr(args, "negative_policies", ["clean_only"])
+    features = getattr(args, "feature_sets", ["portable", "extended", "shape"])
+    if (
+        not features
+        or len(set(features)) != len(features)
+        or not set(features).issubset(supervised.registered_feature_sets())
+    ):
+        raise ValueError("Specify distinct registered feature sets.")
     if (
         not policies
         or len(set(policies)) != len(policies)
@@ -122,12 +129,12 @@ def run_supervised(args):
         raise ValueError("Specify distinct registered negative policies.")
     if args.dry_run:
         print(
-            "Complete feature files found. Will fit portable, extended and shape on source only; negative policies: {}. No output written.".format(
-                policies
+            "Complete feature files found. Will fit {} on source only; negative policies: {}. No output written.".format(
+                features, policies
             )
         )
         return
-    run = Run(root, args, hashes)
+    run = Run(root, args, hashes, protocol=protocol)
     summaries = []
     for seed in args.seeds:
         with run.stage("seed{}_fit_and_freeze_source_models".format(seed)):
@@ -141,9 +148,7 @@ def run_supervised(args):
                 raise ValueError("Source metadata differs from declared task/seed.")
             bundles = {}
             variants = [
-                (feature, policy)
-                for feature in ("portable", "extended", "shape")
-                for policy in policies
+                (feature, policy) for feature in features for policy in policies
             ]
             for feature, policy in variants:
                 name = (
@@ -224,6 +229,7 @@ def run_supervised(args):
                             feature_set=name,
                             negative_policy=bundle.get("negative_policy", "clean_only"),
                             raw_feature_set=bundle["feature_set"],
+                            n_features=len(bundle["feature_columns"]),
                             replication_identity={
                                 "checkpoint": metadata["checkpoint_sha256"],
                                 "inversions": metadata["inversion_sha256"],
@@ -252,7 +258,9 @@ def run_supervised(args):
         lines = [
             "# Supervised revision: exploratory reused test",
             "",
-            "Shape uses per-image stage L2 normalization and discards magnitude. No target calibration or automatic model selection.",
+            "Feature sets: {}. Shape, if included, uses per-image stage L2 normalization. No target calibration or automatic model selection.".format(
+                ", ".join(features)
+            ),
             "",
             "| Seed | Task | Variant | Synthetic | Clean/poison AUC | Clean FPR | Poison TPR | Random sample alerts | Poison/random AUC | Clean bag alerts |",
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -283,6 +291,9 @@ def run_supervised(args):
             "Per-run rates include low-contamination and random controls. Lower false alerts alone do not establish success if detection power disappears.",
         ]
         (root / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if finalize is not None:
+        with run.stage("write_granularity_comparison"):
+            finalize(root, summaries)
     run.finish()
 
 
@@ -455,6 +466,12 @@ def build_parser():
         )
         p.add_argument("--dry-run", action="store_true")
         if name == "supervised":
+            p.add_argument(
+                "--feature-sets",
+                nargs="+",
+                choices=supervised.registered_feature_sets(),
+                default=["portable", "extended", "shape"],
+            )
             p.add_argument("--seeds", type=int, nargs="+", default=[3, 4])
             p.add_argument("--source-task", type=int, default=1)
             p.add_argument("--target-task", type=int, default=9)
