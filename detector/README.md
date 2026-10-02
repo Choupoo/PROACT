@@ -1,5 +1,14 @@
 # 毕设 Detector：完整研究流程与运行指南
 
+## 最新优先级：先修正标签依赖和阈值，扩展实验暂缓
+
+按教授最新邮件，当前入口是 [ADVISOR_REVISION.md](ADVISOR_REVISION.md)。
+新流程使用预测类别梯度、删除 true-class probability，默认只做单配置阈值 pilot，
+不自动运行多方法、多攻击、无监督重评估或消融。
+Rank 的数据集级定义和模拟 bags 的准确解释见
+[英文方法说明](results/methodology-03-10-2026.md)。下面旧入口仅用于历史研究复现，
+不能将旧 ground_truth 特征结果当成修正后结果。
+
 ## 梯度粒度补充实验
 
 只补教授提出的 global / stage / layer / parameter-tensor 范数受控对照，运行

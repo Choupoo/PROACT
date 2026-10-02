@@ -53,7 +53,8 @@ def validate_artifact(artifact, checkpoint, expected_size=5000):
     right = dict(artifact["pretrained_ckpt"], task_num=9)
     compare_checkpoint_identity(left, right)
     validate_attack_artifact(
-        dict(artifact, pretrained_ckpt=right, attacked_task=9), expected_size
+        dict(artifact, pretrained_ckpt=right, attacked_task=9), expected_size,
+        allowed_modes=("reckless", "cautious"),
     )
     if artifact.get("real", False):
         raise ValueError("This registered protocol uses inversion-based BrainWash.")
@@ -92,6 +93,17 @@ def load_defender(checkpoint, device, head_seed):
     fishers = {
         n.replace(".", "_") + "_fisher": p.shape for n, p in model.named_parameters()
     }
+    # CL bookkeeping buffers are not forward-pass parameters. Validate against
+    # a full ten-head schema before ignoring them (RWALK scores can be signed).
+    shapes = {name: param.shape for name, param in model.named_parameters()}
+    for index in range(task + 1, 10):
+        shapes["heads.{}.weight".format(index)] = (10, model.emb_dim)
+        shapes["heads.{}.bias".format(index)] = (10,)
+    bookkeeping = {}
+    for name, shape in shapes.items():
+        key = name.replace(".", "_")
+        for prefix in ("fisher_", "running_fisher_", "omega_", "s_", "running_s_"):
+            bookkeeping[prefix + key] = (shape, "fisher" in prefix or prefix == "omega_")
     for key, value in saved.items():
         value = torch.as_tensor(value)
         if not torch.isfinite(value).all():
@@ -100,6 +112,11 @@ def load_defender(checkpoint, device, head_seed):
             if value.shape != expected[key].shape:
                 raise ValueError("Checkpoint tensor shape mismatch: " + key)
             filtered[key] = value
+            continue
+        if key in bookkeeping:
+            shape, nonnegative = bookkeeping[key]
+            if value.shape != shape or (nonnegative and (value < 0).any()):
+                raise ValueError("Invalid CL bookkeeping buffer: " + key)
             continue
         future = re.fullmatch(r"heads\.(\d+)\.(weight|bias)", key)
         if future and task < int(future.group(1)) < 10:

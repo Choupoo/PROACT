@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -25,7 +27,7 @@ from detector.extract_features import (
     extract_one,
     matched_random_noise,
 )
-from detector.io_utils import ensure_output_path
+from detector.io_utils import DETECTOR_ROOT, ensure_output_path
 from detector.train_detector import feature_sets, validate_feature_table
 from detector.transfer_core import (
     TASK_ORDER,
@@ -37,7 +39,24 @@ from detector.transfer_core import (
 )
 
 
+def scoped_dataset(checkpoint, output):
+    """Upstream uses relative data/; direct CLI calls must not write at repo root."""
+    previous = Path.cwd()
+    if previous == DETECTOR_ROOT or DETECTOR_ROOT in previous.parents:
+        return fixed_dataset_specs(**checkpoint)
+    cache = ensure_output_path(output.parent / "dataset_cache")
+    cache.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chdir(cache)
+        return fixed_dataset_specs(**checkpoint)
+    finally:
+        os.chdir(previous)
+
+
 def main(args):
+    inference_schema = getattr(args, "inference_schema", False)
+    if inference_schema and args.label_mode != "predicted":
+        raise ValueError("Inference schema requires predicted gradients.")
     output = ensure_output_path(args.output_dir)
     if output.exists():
         raise FileExistsError(
@@ -50,7 +69,7 @@ def main(args):
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable.")
-    data, _, _, _, _ = fixed_dataset_specs(**checkpoint)
+    data, _, _, _, _ = scoped_dataset(checkpoint, output)
     incoming = data["train"][task]
     targets = torch.as_tensor(incoming.targets).long().cpu().numpy()
     if len(targets) != 5000 or not np.array_equal(np.bincount(targets), [500] * 10):
@@ -98,6 +117,12 @@ def main(args):
         "attack_seed": int(artifact["seed"]),
         "reference_trust_assumption": "All previously trained tasks and checkpoints are clean.",
         "random_norm_matching": "Before image clamping only",
+        "cl_method": checkpoint.get("cont_method_args", {}).get("method"),
+        "attack_config": {
+            key: artifact.get(key) for key in
+            ("mode", "delta", "seed", "n_epochs", "n_iters", "w_cur", "real", "reverse")
+        },
+        "gradient_target": "predicted_argmax" if args.label_mode == "predicted" else "ground_truth",
     }
     permutation = torch.as_tensor(artifact["rnd_idx_train"]).long().cpu()
     inverse = torch.argsort(permutation)
@@ -110,7 +135,11 @@ def main(args):
         image = torch.as_tensor(incoming.data[index]).float().cpu()
         source = int(inverse[index])
         delta = noise[source]
-        random_delta = matched_random_noise(delta, args.random_control_seed + index)
+        if getattr(args, "random_control", "matched") == "uniform":
+            generator = torch.Generator().manual_seed(args.random_control_seed + index)
+            random_delta = (torch.rand(delta.shape, generator=generator) * 2 - 1) * float(artifact["delta"])
+        else:
+            random_delta = matched_random_noise(delta, args.random_control_seed + index)
         for view, label, current in (
             ("clean", 0, image),
             ("poison", 1, (image + delta).clamp(0, 1)),
@@ -122,7 +151,7 @@ def main(args):
                 parameters,
                 past_device,
                 current,
-                int(item.class_id),
+                None if args.label_mode == "predicted" else int(item.class_id),
                 device,
                 directions_device,
                 args.label_mode,
@@ -149,15 +178,23 @@ def main(args):
                 flush=True,
             )
     table = pd.DataFrame(rows)
-    validate_feature_table(table)
+    fixed_columns = list(FEATURE_COLUMNS)
+    if inference_schema:
+        table = table.drop(columns=["true_class_probability"])
+        fixed_columns.remove("true_class_probability")
+        metadata["inference_schema"] = "predicted_without_true_class_v1"
+    validate_feature_table(table, fixed_columns if inference_schema else None)
     assert_model_unchanged(model, before)
     output.mkdir(parents=True)
     path = output / "features.csv"
     table.to_csv(path, index=False)
     manifest.to_csv(output / "manifest.csv", index=False)
+    metadata["random_control"] = getattr(args, "random_control", "matched")
+    if metadata["random_control"] == "uniform":
+        metadata["random_norm_matching"] = "Uniform [-delta, delta], same L-infinity budget; not matched L2 norms"
     metadata.update(
-        feature_columns=feature_sets(table)["all"],
-        fixed_feature_columns=FEATURE_COLUMNS,
+        feature_columns=[c for c in feature_sets(table)["all"] if c in table],
+        fixed_feature_columns=fixed_columns,
         model_unchanged=True,
         row_count=len(table),
         features_sha256=sha256_file(path),
@@ -176,8 +213,10 @@ def build_parser():
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--incoming-task", type=int, required=True)
     parser.add_argument(
-        "--label-mode", choices=("ground_truth", "predicted"), default="ground_truth"
+        "--label-mode", choices=("ground_truth", "predicted"), default="predicted"
     )
+    parser.add_argument("--random-control", choices=("matched", "uniform"), default="matched")
+    parser.add_argument("--inference-schema", action="store_true", help="Omit the legacy true_class_probability column; requires predicted mode.")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--head-seed", type=int, default=20260720)
     parser.add_argument("--feature-seed", type=int, default=20260721)

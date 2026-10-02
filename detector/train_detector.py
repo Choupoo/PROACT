@@ -96,9 +96,9 @@ def feature_sets(features):
     }
 
 
-def validate_feature_table(features):
+def validate_feature_table(features, required_features=None):
     """Reject incomplete pairs, inconsistent provenance, and invalid values."""
-    required = set(METADATA_COLUMNS + FEATURE_COLUMNS)
+    required = set(METADATA_COLUMNS + (FEATURE_COLUMNS if required_features is None else list(required_features)))
     missing = required - set(features.columns)
     if missing:
         raise KeyError("Feature table is missing columns: {}".format(sorted(missing)))
@@ -184,6 +184,8 @@ def validate_feature_table(features):
         )
 
     all_columns = feature_sets(features)["all"]
+    if required_features is not None:
+        all_columns = [c for c in all_columns if c in features]
     for column in all_columns:
         if not pd.api.types.is_numeric_dtype(features[column]):
             raise RuntimeError("Feature {} must be numeric.".format(column))

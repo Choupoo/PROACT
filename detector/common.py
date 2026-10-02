@@ -130,7 +130,7 @@ def validate_victim_checkpoint(checkpoint):
         raise ValueError("checkpoint['model'] is empty.")
 
 
-def validate_attack_artifact(artifact, expected_size=5000):
+def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckless",)):
     if not isinstance(artifact, Mapping):
         raise TypeError("BrainWash artifact must be a dictionary-like mapping.")
 
@@ -150,8 +150,8 @@ def validate_attack_artifact(artifact, expected_size=5000):
 
     validate_victim_checkpoint(artifact["pretrained_ckpt"])
 
-    if artifact["mode"] != "reckless":
-        raise ValueError("This detector experiment uses reckless BrainWash.")
+    if artifact["mode"] not in allowed_modes:
+        raise ValueError("Unsupported BrainWash mode for this experiment: " + str(artifact["mode"]))
 
     if artifact.get("reverse", False):
         raise ValueError("A reverse (defense) artifact is not a BrainWash attack.")

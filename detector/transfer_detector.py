@@ -52,6 +52,12 @@ GRANULARITY_GROUPS = tuple(
     for level in ("global", "stage", "layer", "parameter")
 )
 CONTEXT_COLUMNS = list(UNCERTAINTY_FEATURE_COLUMNS) + ["activation_norm_l2"]
+INFERENCE_CONTEXT = ["entropy", "confidence", "margin", "activation_norm_l2"]
+INFERENCE_GROUPS = (
+    "inference_full", "inference_gradients", "inference_context", "inference_stage",
+    "inference_without_entropy", "inference_without_confidence",
+    "inference_without_margin", "inference_without_activation_norm_l2",
+)
 NEGATIVE_POLICIES = ("clean_only", "clean_and_random")
 RATES = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
 
@@ -61,11 +67,28 @@ def registered_feature_sets():
         list(FEATURE_GROUPS)
         + list(EXPERIMENTAL_FEATURE_GROUPS)
         + list(GRANULARITY_GROUPS)
+        + list(INFERENCE_GROUPS)
     )
 
 
 def resolve_feature_columns(table, metadata, feature_set):
     """Resolve granularity from source schema only, never from target metrics."""
+    if feature_set in INFERENCE_GROUPS:
+        if metadata.get("label_mode") != "predicted" or set(table.label_mode) != {"predicted"}:
+            raise ValueError("Inference features require predicted gradients; removing one column is insufficient.")
+        context = list(INFERENCE_CONTEXT)
+        if feature_set.startswith("inference_without_"):
+            context.remove(feature_set[len("inference_without_"):])
+        if feature_set == "inference_context":
+            columns = context
+        else:
+            base = "norm_stage" if feature_set == "inference_stage" else "norm_parameter"
+            columns = resolve_feature_columns(table, metadata, base)
+            if feature_set != "inference_gradients":
+                columns += context
+        if not set(columns).issubset(metadata.get("feature_columns", [])):
+            raise ValueError("Inference features absent from metadata.")
+        return columns
     groups = dict(FEATURE_GROUPS, **EXPERIMENTAL_FEATURE_GROUPS)
     if feature_set in groups:
         return list(groups[feature_set])
@@ -127,7 +150,15 @@ def fresh_output(path):
 
 
 def validate_table(table, metadata):
-    validate_feature_table(table)
+    inference_schema = metadata.get("inference_schema")
+    if inference_schema is not None:
+        if inference_schema != "predicted_without_true_class_v1" or metadata.get("label_mode") != "predicted":
+            raise ValueError("Invalid inference feature schema.")
+        if "true_class_probability" in table:
+            raise ValueError("New inference schema must omit true_class_probability.")
+        validate_feature_table(table, [c for c in FEATURE_COLUMNS if c != "true_class_probability"])
+    else:
+        validate_feature_table(table)
     contract(metadata)
     for key in (
         "feature_protocol",
