@@ -57,6 +57,7 @@ INFERENCE_GROUPS = (
     "inference_full", "inference_gradients", "inference_context", "inference_stage",
     "inference_without_entropy", "inference_without_confidence",
     "inference_without_margin", "inference_without_activation_norm_l2",
+    "inference_without_uncertainty",
 )
 NEGATIVE_POLICIES = ("clean_only", "clean_and_random")
 RATES = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
@@ -77,7 +78,9 @@ def resolve_feature_columns(table, metadata, feature_set):
         if metadata.get("label_mode") != "predicted" or set(table.label_mode) != {"predicted"}:
             raise ValueError("Inference features require predicted gradients; removing one column is insufficient.")
         context = list(INFERENCE_CONTEXT)
-        if feature_set.startswith("inference_without_"):
+        if feature_set == "inference_without_uncertainty":
+            context = ["activation_norm_l2"]
+        elif feature_set.startswith("inference_without_"):
             context.remove(feature_set[len("inference_without_"):])
         if feature_set == "inference_context":
             columns = context

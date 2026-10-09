@@ -107,13 +107,16 @@ def calibrate(bundle, histories, rule, alpha=0.05, mad_multiplier=3.0):
     return result
 
 
-def select_rule(reports, alpha):
+def select_rule(reports, alpha, fixed_rule=None):
     """Prespecified development criterion; random controls are not negatives.
 
     Feasible: sample and dataset clean alerts <= alpha. Among feasible rules,
     maximize mean bag detection at 10/25/50/100% poison. If none are feasible,
     choose smallest worst clean rate and explicitly report failed feasibility.
+    With fixed_rule, retain the prespecified rule even if another is feasible.
     """
+    if fixed_rule is not None and fixed_rule not in RULES:
+        raise ValueError("Unknown prespecified threshold rule.")
     rows = []
     for rule in RULES:
         report = reports[rule]
@@ -124,16 +127,27 @@ def select_rule(reports, alpha):
         rows.append({"rule": rule, "sample_fpr": fpr, "dataset_fpr": clean,
                      "poison_power": float(power), "feasible": max(fpr, clean) <= alpha})
     feasible = [r for r in rows if r["feasible"]]
-    if feasible:
+    if fixed_rule is not None:
+        selected = next(r for r in rows if r["rule"] == fixed_rule)
+        criterion_met = selected["feasible"]
+    elif feasible:
         selected = min(feasible, key=lambda r: (-r["poison_power"], RULES.index(r["rule"])))
+        criterion_met = True
     else:
         selected = min(rows, key=lambda r: (max(r["sample_fpr"], r["dataset_fpr"]), -r["poison_power"], RULES.index(r["rule"])))
-    return {"selected_rule": selected["rule"], "development_criterion_met": bool(feasible),
-            "candidates": rows, "selection_data": "Development task test split; never final target",
-            "warning": None if feasible else "No candidate met the development clean-error criterion. Final evaluation remains diagnostic."}
+        criterion_met = False
+    return {"selected_rule": selected["rule"], "development_criterion_met": bool(criterion_met),
+            "candidates": rows, "selection_data": (
+                "Rule fixed before this experiment; development test used for diagnostics only, never final target"
+                if fixed_rule else "Development task test split; never final target"),
+            "selection_mode": "prespecified" if fixed_rule else "development_comparison",
+            "warning": None if criterion_met else (
+                "Prespecified rule failed the development clean-error criterion; retained without switching rules."
+                if fixed_rule else "No candidate met the development clean-error criterion. Final evaluation remains diagnostic.")}
 
 
-def develop(source_path, history_paths, output, task_size=150, repeats=100, alpha=0.05, ablations=False):
+def develop(source_path, history_paths, output, task_size=150, repeats=100, alpha=0.05, ablations=False,
+            threshold_rule=None):
     output = base.fresh_output(output)
     source = read_feature_table(source_path)
     histories = [source] + [read_feature_table(p) for p in history_paths]
@@ -152,7 +166,7 @@ def develop(source_path, history_paths, output, task_size=150, repeats=100, alph
     for rule in RULES:
         candidates[rule] = calibrate(fitted, histories, rule, alpha)
         reports[rule], _, _ = base.evaluate(*histories[-1], candidates[rule], repeats=repeats)
-    selection = select_rule(reports, alpha)
+    selection = select_rule(reports, alpha, fixed_rule=threshold_rule)
     save_json(selection, output / "threshold_selection.json")
     save_json(reports, output / "development_metrics.json")
     # Save every threshold candidate for honest frozen target comparison.
@@ -170,6 +184,7 @@ def develop(source_path, history_paths, output, task_size=150, repeats=100, alph
     save_json({"label_mode": "predicted", "forbidden_feature": "true_class_probability",
                "source": str(source_path), "histories": list(map(str, history_paths)),
                "calibration_tasks": tasks, "selection": selection,
+               "prespecified_threshold_rule": threshold_rule,
                "variants": variants,
                "target_used_for_fitting_or_calibration": False}, output / "freeze.json")
 
@@ -183,8 +198,11 @@ def main():
     parser.add_argument("--bags-per-rate", type=int, default=100)
     parser.add_argument("--alpha", type=float, default=0.05)
     parser.add_argument("--ablations", action="store_true", help="Deferred until methodology is agreed; disabled by default.")
+    parser.add_argument("--threshold-rule", choices=RULES,
+                        help="Keep this rule fixed, including when the development criterion fails.")
     args = parser.parse_args()
-    develop(args.source, args.histories, args.output_dir, args.task_size, args.bags_per_rate, args.alpha, args.ablations)
+    develop(args.source, args.histories, args.output_dir, args.task_size, args.bags_per_rate, args.alpha,
+            args.ablations, args.threshold_rule)
 
 
 if __name__ == "__main__":

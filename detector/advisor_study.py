@@ -116,6 +116,8 @@ def build_cell(root, settings, method, seed):
                               command=command("advisor_detector", "--source", histories[0], "--histories", *histories[1:],
                                               "--output-dir", model_dir, "--task-size", settings["task_size"],
                                               "--bags-per-rate", settings["bags_per_rate"], "--alpha", settings["alpha"],
+                                              *(["--threshold-rule", settings["threshold_rule"]]
+                                                if settings.get("threshold_rule") else []),
                                               *(["--ablations"] if settings["ablations"] else [])),
                               outputs=[str(model_dir)], owned=[str(model_dir)]))
     return cell, steps
@@ -139,6 +141,7 @@ def evaluate(args):
             report, predictions, bags = supervised.evaluate(table, meta, bundle, repeats=args.bags_per_rate)
             report.update(threshold_rule=bundle["threshold_rule"], calibration_history=bundle["calibration_history"],
                           threshold_selection=freeze["selection"], attack_config=meta["attack_config"],
+                          feature_columns=bundle["feature_columns"], feature_count=len(bundle["feature_columns"]),
                           cl_method=meta["cl_method"], checkpoint_seed=meta["checkpoint_seed"])
             destination = output / family / name
             save_json(report, destination / "evaluation_metrics.json")
@@ -289,6 +292,7 @@ def summarize(args):
                         clean = next(r["alert_rate"] for r in report["dataset_results"] if r["realized_rate"] == 0)
                         row = dict(identity, family=family, variant=variant, **report["sample_metrics"],
                                    clean_dataset_fpr=clean, random_sample_alert=report["random_control_sample_alert_rate"],
+                                   feature_count=report.get("feature_count"),
                                    threshold_rule=report["threshold_rule"], dataset_results=report["dataset_results"])
                         rows.append(row)
                 if settings["unsupervised"]:
@@ -303,8 +307,19 @@ def summarize(args):
         for keys, group in frame.groupby(["method", "attack", "delta", "family", "variant"]):
             item = dict(zip(["method", "attack", "delta", "family", "variant"], keys))
             item["n_seeds"] = len(group)
-            for metric in ("roc_auc", "clean_fpr", "poison_tpr", "clean_dataset_fpr"):
+            for metric in ("roc_auc", "average_precision", "clean_fpr", "poison_tpr", "clean_dataset_fpr", "random_sample_alert"):
                 item[metric] = dict(mean=float(group[metric].mean()), std=float(group[metric].std(ddof=1)) if len(group) > 1 else None)
+            item["dataset_results"] = []
+            for alternative in ("poison", "random_control"):
+                rates = sorted({r["requested_rate"] for row in group.dataset_results for r in row
+                                if r["alternative"] == alternative})
+                for rate in rates:
+                    selected = [next(r for r in result if r["alternative"] == alternative and
+                                     r["requested_rate"] == rate) for result in group.dataset_results]
+                    values = np.array([r["alert_rate"] for r in selected])
+                    item["dataset_results"].append(dict(alternative=alternative, requested_rate=rate,
+                        realized_rate=selected[0]["realized_rate"], n_seeds=len(values),
+                        mean=float(values.mean()), std=float(values.std(ddof=1)) if len(values) > 1 else None))
             aggregates.append(item)
         for keys, group in frame[frame.family == "ablations"].groupby(["method", "seed", "attack", "delta"]):
             baseline = group[group.variant == "inference_full"].iloc[0]
@@ -315,11 +330,37 @@ def summarize(args):
                 item["variant"] = row.variant
                 for metric in ("roc_auc", "clean_fpr", "poison_tpr", "clean_dataset_fpr"):
                     item[metric + "_minus_full"] = float(row[metric] - baseline[metric])
+                item["dataset_detection_deltas"] = []
+                for result in row["dataset_results"]:
+                    match = next(r for r in baseline["dataset_results"] if
+                                 r["alternative"] == result["alternative"] and
+                                 r["requested_rate"] == result["requested_rate"])
+                    item["dataset_detection_deltas"].append(dict(alternative=result["alternative"],
+                        realized_rate=result["realized_rate"], requested_rate=result["requested_rate"],
+                        alert_rate_minus_full=result["alert_rate"] - match["alert_rate"]))
                 paired_ablation_deltas.append(item)
         if paired_ablation_deltas:
-            pd.DataFrame(paired_ablation_deltas).to_csv(output / "paired_ablation_deltas.csv", index=False)
+            pd.DataFrame([{k: v for k, v in r.items() if k != "dataset_detection_deltas"}
+                          for r in paired_ablation_deltas]).to_csv(output / "paired_ablation_deltas.csv", index=False)
+    unsupervised_aggregates = []
+    grouped_unsupervised = {}
+    for item in label_free:
+        for result in item["summary"]:
+            key = (item["method"], item["attack"], item["delta"], result["scenario"], result["requested_rate"])
+            grouped_unsupervised.setdefault(key, []).append(result)
+    for key, results in sorted(grouped_unsupervised.items()):
+        row = dict(zip(("method", "attack", "delta", "scenario", "requested_rate"), key))
+        row.update(n_seeds=len(results), realized_rate=results[0]["realized_rate"])
+        for metric in ("rank_alert_rate", "rank_coverage", "legacy_alert_rate"):
+            values = [r[metric] for r in results if r[metric] is not None]
+            # Missing coverage is not a clean decision. No silently averaging supported seeds only.
+            row[metric] = dict(n_supported_seeds=len(values),
+                mean=float(np.mean(values)) if len(values) == len(results) else None,
+                std=float(np.std(values, ddof=1)) if len(values) == len(results) and len(values) > 1 else None)
+        unsupervised_aggregates.append(row)
     summary = dict(status="complete" if not missing else "incomplete", missing=missing,
                    selections=selections, supervised=rows, aggregates=aggregates, unsupervised=label_free,
+                   unsupervised_aggregates=unsupervised_aggregates,
                    paired_ablation_deltas=paired_ablation_deltas,
                    attack_effectiveness=effects, plan_fingerprint=payload["fingerprint"],
                    limitations=["Bags reuse finite images; summarize variability over seeds, not bags.",
@@ -330,7 +371,10 @@ def summarize(args):
     save_json(summary, output / "summary.json")
     lines = ["# Predicted-gradient detector update", "", "Status: **{}**.".format(summary["status"]), "",
              "The detector uses predicted classes, not image-class labels. Tensor norms are retained.",
-             "Threshold rules are selected on development tasks and frozen before Task 9. Random alerts are noise sensitivity, not clean FPR.", "",
+             ("The threshold rule is prespecified as {}; its numeric sample/count cutoffs are calibrated using Tasks 1 and 4 and frozen before Task 9."
+              .format(settings["threshold_rule"]) if settings.get("threshold_rule") else
+              "Threshold rules are selected on development tasks and frozen before Task 9."),
+             "Random alerts are noise sensitivity, not clean FPR.", "",
              "| CL method | Seed | Attack | Budget | AUC | Sample clean FPR | Poison TPR | Dataset clean FPR |",
              "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |"]
     for row in rows:
@@ -353,7 +397,7 @@ def summarize(args):
               "| CL method | Seed | Attack | Budget | View | Realized fraction | Rank alert | Rank coverage | MMD alert |",
               "| --- | ---: | --- | ---: | --- | ---: | ---: | ---: | ---: |"]
     if not settings["unsupervised"]:
-        lines += ["", "Not rerun in this methodology pilot; see the methodology note for the definition of Rank and simulated bags."]
+        lines += ["", "Rank/MMD were not enabled for this plan; no new unsupervised results are reported."]
     for item in label_free:
         for row in item["summary"]:
             alert = "unsupported" if row["rank_alert_rate"] is None else "{:.2%}".format(row["rank_alert_rate"])
@@ -369,7 +413,7 @@ def summarize(args):
             row["method"], row["seed"], row["attack"], row["delta"], row["poison"]["past_drop_vs_clean"],
             row["uniform"]["past_drop_vs_clean"], row["poison"]["bwt"], row["uniform"]["bwt"]))
     if not settings["effectiveness"]:
-        lines += ["", "Additional forgetting controls are deferred; this pilot only fixes features and evaluates threshold rules."]
+        lines += ["", "Forgetting controls were not enabled for this plan; no training-effectiveness results are reported."]
     lines += ["", "## Ablations and seed variability", "",
               ("Ablations are retrained on the same source splits; paired_ablation_deltas.csv gives variant minus full-model differences. These are diagnostic comparisons, not target-based selection."
                if settings["ablations"] else "Ablations are deferred until the methodology is agreed. Only the corrected full model is fitted."), "",
@@ -381,15 +425,32 @@ def summarize(args):
             lines.append("| {} | {} | {} | {} | {} | {:.4f} | {} | {:.2%} | {:.2%} |".format(
                 row["method"], row["attack"], row["delta"], row["variant"], row["n_seeds"],
                 row["roc_auc"]["mean"], sd, row["clean_fpr"]["mean"], row["clean_dataset_fpr"]["mean"]))
+    lines += ["", "## Paired feature-removal comparisons", "",
+              "Each difference uses the full model from the same CL method, seed, attack, original-image splits and evaluation bags. Every ablation is retrained and recalibrated on the same historical splits using the full model's rule, without target tuning.", "",
+              "| CL method | Seed | Attack | Budget | Variant | AUC difference | Clean dataset FPR difference | Detection difference at 5.33% poison |",
+              "| --- | ---: | --- | ---: | --- | ---: | ---: | ---: |"]
+    for row in paired_ablation_deltas:
+        low_rate = next((r["alert_rate_minus_full"] for r in row["dataset_detection_deltas"]
+                         if r["alternative"] == "poison" and r["requested_rate"] == .05), None)
+        low_text = "n/a" if low_rate is None else "{:+.2%}".format(low_rate)
+        lines.append("| {} | {} | {} | {} | {} | {:+.4f} | {:+.2%} | {} |".format(
+            row["method"], row["seed"], row["attack"], row["delta"], row["variant"],
+            row["roc_auc_minus_full"], row["clean_dataset_fpr_minus_full"], low_text))
+    lines += ["", "## Discussion checks", "",
+              "Read AUC together with the frozen sample and dataset decisions. A strong AUC with excessive clean alerts indicates a threshold-transfer failure, not successful deployment detection.",
+              "Feature removal is informative only alongside clean FPR and detection at each contamination count. Little change in this matrix is not proof that a feature is unnecessary in every setting.",
+              "Compare variability across model/attack seeds. Repeated bags share originals and attack artifacts, so their number does not provide independent experimental replication.",
+              "Rank/MMD measure historical distribution mismatch. Clean mismatch and attack sensitivity must be discussed together; unsupported Rank tests are not counted as clean decisions.",
+              "Use full-task forgetting controls to check whether BrainWash and uniform perturbations are harmful. They do not establish that filtering detector alerts improves CL performance."]
     lines += ["", "## What still needs attention", ""]
     if missing:
         lines.append("{} method/seed cells remain incomplete. This is not a final experimental result.".format(len(missing)))
     failed = sum(not r["development_criterion_met"] for r in selections)
-    lines.append("{} completed cells had no threshold rule satisfying the development clean-error criterion.".format(failed))
+    lines.append("{} completed cells did not meet the development clean-error criterion with their reported rule.".format(failed))
     for row in rows:
         if row["family"] == "ablations" and row["variant"] == "inference_full" and max(row["clean_fpr"], row["clean_dataset_fpr"]) > settings["alpha"]:
             lines.append("- {} seed {} {} {}: the frozen rule exceeded the nominal clean-error target on Task 9.".format(row["method"], row["seed"], row["attack"], row["delta"]))
-    lines += ["", "The JSON contains every ablation, threshold comparison, poisoning fraction, Rank/MMD result and clean/poison/uniform forgetting control. Do not select a new winner from target results.", ""] + summary["limitations"]
+    lines += ["", "The JSON contains the results enabled in this plan, including failed settings. Empty unsupervised or attack_effectiveness lists mean those experiments were not run. Do not select a new winner from target results.", ""] + summary["limitations"]
     (output / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("Saved:", output)
 
@@ -415,6 +476,7 @@ def plan(args):
                     task_size=args.task_size, bags_per_rate=args.bags_per_rate, alpha=args.alpha,
                     label_mode="predicted", protocol="advisor_predicted_v1",
                     attacks=[list(a) for a in (ATTACKS if args.expanded_settings else (("reckless", .3),))],
+                    threshold_rule=getattr(args, "threshold_rule", None),
                     ablations=args.ablations, unsupervised=args.expanded_settings,
                     effectiveness=args.expanded_settings,
                     scope="expanded" if args.expanded_settings else "methodology_pilot")
@@ -433,6 +495,8 @@ def main():
     p.add_argument("--seeds", type=int, nargs="+", default=[5])
     p.add_argument("--expanded-settings", action="store_true", help="Deferred: use only after methodology agreement.")
     p.add_argument("--ablations", action="store_true", help="Deferred; requires --expanded-settings.")
+    p.add_argument("--threshold-rule", choices=advisor.RULES,
+                   help="Prespecify a rule instead of selecting again in each cell.")
     p.add_argument("--source-task", type=int, default=1)
     p.add_argument("--history-tasks", type=int, nargs="+", default=[4])
     p.add_argument("--target-task", type=int, default=9)

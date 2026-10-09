@@ -1,5 +1,8 @@
 # 教授最新反馈：先修正特征与阈值
 
+这份文档记录之前的单配置方法检查。教授现已认可方法，后续扩展实验请使用
+[ADVISOR_FINAL_RUN.md](ADVISOR_FINAL_RUN.md)，不要把下面的 pilot 当成完整实验矩阵。
+
 当前默认入口仅运行 **EWC / reckless BrainWash / L∞ 0.3 / 一个 seed** 的方法检查。
 多 CL 方法、多攻击和消融已设为显式的后续选项，默认不会执行。
 这不是已经验证误报下降的结果，也不能替代教授对方法的确认。
@@ -49,7 +52,7 @@ python -B -u -m detector.advisor_study evaluate \
   --output-dir detector/work/feature_threshold_pilot/evaluation
 ```
 
-这条路径默认只拟合修正后的完整模型和三种阈值规则，不运行八组消融。
+这条路径默认只拟合修正后的完整模型和三种阈值规则，不运行消融。
 Task 4 是一个可调整的开发任务选择，不是教授指定编号；必须在看最终结果前确定。
 既有 seed 3/4 的 Task 9 已被分析过，因此复用它们是探索性复核，不是全新独立确认。
 

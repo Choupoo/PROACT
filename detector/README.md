@@ -1,8 +1,16 @@
 # 毕设 Detector：完整研究流程与运行指南
 
-## 最新优先级：先修正标签依赖和阈值，扩展实验暂缓
+## 当前入口：方法已确认，完成扩展实验和消融
 
-按教授最新邮件，当前入口是 [ADVISOR_REVISION.md](ADVISOR_REVISION.md)。
+教授已接受特征和阈值方法。正式运行指南见 [ADVISOR_FINAL_RUN.md](ADVISOR_FINAL_RUN.md)。
+执行 `bash detector/run_advisor_final.sh plan` 注册新计划，再在 CUDA 服务器执行
+`bash detector/run_advisor_final.sh run`。默认覆盖五种 CL 方法、四种目标攻击、
+seeds 6/7/8、九个监督特征版本、Rank/MMD 和遗忘对照；固定 `history_mad` 规则。
+这里是运行方案，不是已经完成的 GPU 实验结果。旧产物保留，不混入新计划。
+
+## 历史阶段：先修正标签依赖和阈值
+
+之前的方法检查入口是 [ADVISOR_REVISION.md](ADVISOR_REVISION.md)。
 新流程使用预测类别梯度、删除 true-class probability，默认只做单配置阈值 pilot，
 不自动运行多方法、多攻击、无监督重评估或消融。
 Rank 的数据集级定义和模拟 bags 的准确解释见
