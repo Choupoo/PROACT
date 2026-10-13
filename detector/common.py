@@ -15,18 +15,30 @@ import numpy as np
 import torch
 
 
+def _json_numpy_value(value):
+    """Keep numerical results as JSON numbers, including pandas group keys."""
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError("Object of type {} is not JSON serializable".format(
+        type(value).__name__))
+
+
 def save_json(data, path):
+    # Validate before opening the destination so a serialization error cannot
+    # truncate an existing report. Non-finite numbers remain errors.
+    encoded = json.dumps(data, indent=2, sort_keys=True, allow_nan=False,
+                         default=_json_numpy_value)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with path.open("w", encoding="utf-8") as file:
-        json.dump(
-            data,
-            file,
-            indent=2,
-            sort_keys=True,
-            allow_nan=False,
-        )
+        file.write(encoded)
         file.write("\n")
 
 

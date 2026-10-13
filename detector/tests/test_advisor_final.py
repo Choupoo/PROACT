@@ -190,6 +190,46 @@ class FinalStudyTests(unittest.TestCase):
             self.assertIn("--threshold-rule history_mad", dry.stdout)
             self.assertIn(sys.executable, dry.stdout)
             self.assertFalse((Path(directory) / "run/mas/seed6/run_state.json").exists())
+            plan_path = Path(directory) / "run/plan.json"
+            before = sha256_file(plan_path)
+            compatibility = subprocess.run(
+                ["bash", str(DETECTOR_ROOT / "package_advisor_compat.sh"), "--allow-incomplete"],
+                env=env, cwd=directory, capture_output=True, text=True)
+            self.assertEqual(compatibility.returncode, 0, compatibility.stderr)
+            self.assertIn("Analysis archive:", compatibility.stdout)
+            self.assertEqual(sha256_file(plan_path), before)
+            archive = next(Path(directory).glob("run_analysis_*.tar.gz"))
+            with tarfile.open(archive) as bundle:
+                manifest = json.load(bundle.extractfile("run/package_manifest.json"))
+                self.assertEqual(manifest["status"], "incomplete")
+
+    def test_compat_entrypoint_fixes_legacy_json_dump_in_memory(self):
+        script = (DETECTOR_ROOT / "package_advisor_compat.sh").read_text()
+        code = script.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory(dir=DETECTOR_ROOT / "tests") as directory:
+            path = Path(directory) / "legacy_summary.json"
+
+            def legacy_package():
+                self.assertEqual(sys.argv[1:], ["package", "--output-dir", directory,
+                                               "--allow-incomplete"])
+                # Reproduce the old server writer without the fixed common.py.
+                with path.open("w") as output:
+                    json.dump({"seed": np.int64(6), "rate": np.float32(.25),
+                               "supported": np.bool_(True)}, output, allow_nan=False)
+                with self.assertRaises(ValueError):
+                    json.dumps({"rate": np.float32(np.nan)}, allow_nan=False)
+                with self.assertRaises(TypeError):
+                    json.dumps({"unsupported": object()})
+
+            original_default = json.JSONEncoder.default
+            try:
+                with mock.patch.object(final, "main", side_effect=legacy_package), \
+                     mock.patch.object(sys, "argv", ["-", directory, "--allow-incomplete"]):
+                    exec(compile(code, "package_advisor_compat.sh", "exec"), {})
+            finally:
+                json.JSONEncoder.default = original_default
+            self.assertEqual(json.loads(path.read_text()),
+                             {"seed": 6, "rate": .25, "supported": True})
 
     def test_seed_aggregation_and_unsupported_rank_are_not_clean_decisions(self):
         with tempfile.TemporaryDirectory(dir=DETECTOR_ROOT / "tests") as directory:

@@ -177,6 +177,23 @@ bash detector/run_advisor_final.sh package --allow-incomplete
 不打包数据集、checkpoint、noise、完整特征矩阵或 joblib 模型。
 附带每个导出文件的 SHA-256 清单；这是分析包，不是完整复现归档。
 
+### 正在运行的旧版本遇到 NumPy JSON 序列化错误
+
+如果汇总时报 `Object of type int64 is not JSON serializable`，这是 pandas 分组键
+中的 NumPy 数值未转换为 Python 数值。新版 `common.save_json` 已支持这些类型，
+并在打开文件之前完成序列化检查，避免错误留下截断的 JSON。
+
+已经注册并正在运行的旧实验仍使用原来的 Python 源码：不要在运行目录执行
+`git pull` 或覆盖 `common.py`，否则下一阶段的源码哈希检查会拒绝继续运行。
+只复制新增的 `detector/package_advisor_compat.sh` 到服务器，然后运行：
+
+```bash
+bash detector/package_advisor_compat.sh --allow-incomplete
+```
+
+脚本仅在 CPU 打包进程中转换 NumPy 数值；原有的源码和产物哈希检查仍然执行。
+它重新生成汇总，并按原来的方式导出分析包。不要修改旧 `plan.json` 的指纹。
+
 ## 5. 结果位置和分析重点
 
 - `analysis/summary.json`：完成状态、逐配置结果、多 seed 均值/标准差、dataset-rate 汇总、配对消融差值。

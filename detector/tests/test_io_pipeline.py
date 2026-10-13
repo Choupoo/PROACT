@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from detector import bootstrap
-from detector.common import _CPUUnpickler, load_pickle, sha256_file
+from detector.common import _CPUUnpickler, load_pickle, save_json, sha256_file
 from detector.demo import make_fixtures
 from detector.extract_features import validate_loaded_model_keys
 from detector.io_utils import (
@@ -34,6 +34,28 @@ class IOTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(dir=Path(__file__).parent)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+
+    def test_json_preserves_nested_numpy_numbers_and_arrays(self):
+        path = self.root / "summary.json"
+        save_json({"paired_ablation_deltas": [{"seed": np.int64(6),
+                   "delta": np.float32(.25), "supported": np.bool_(True)}],
+                   "counts": np.array([2, 8], dtype=np.int64)}, path)
+        result = json.loads(path.read_text())
+        self.assertEqual(result, {"paired_ablation_deltas": [
+            {"seed": 6, "delta": .25, "supported": True}], "counts": [2, 8]})
+        self.assertIs(type(result["paired_ablation_deltas"][0]["seed"]), int)
+
+    def test_invalid_json_values_do_not_truncate_existing_report(self):
+        path = self.root / "summary.json"
+        save_json({"seed": 6}, path)
+        before = path.read_bytes()
+        for value in (np.float32(np.nan), np.float64(np.inf), np.array([np.inf])):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                save_json({"invalid": value}, path)
+            self.assertEqual(path.read_bytes(), before)
+        with self.assertRaises(TypeError):
+            save_json({"unsupported": object()}, path)
+        self.assertEqual(path.read_bytes(), before)
 
     def test_all_outputs_are_confined_including_symlinked_children(self):
         self.assertEqual(
