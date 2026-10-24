@@ -75,6 +75,8 @@ def summarize(args):
 def analysis_files(root, settings):
     """Export analysis evidence, not datasets/checkpoints/deserializable models."""
     files = {root / "plan.json"}
+    if (root / "data_manifest.json").is_file():
+        files.add(root / "data_manifest.json")
     files.update(path for path in (root / "analysis").rglob("*") if path.is_file()
                  and path.suffix in (".json", ".csv", ".md"))
     for method in settings["methods"]:
@@ -101,15 +103,16 @@ def analysis_files(root, settings):
                     # Small accuracy matrices support recomputation of forgetting metrics.
                     files.update((case / "effectiveness").glob("*/acc_mat_*.npy"))
                 reference = task_root / "historical_reference"
+                files.update((task_root / "effectiveness_shared").glob("*/acc_mat_*.npy"))
                 files.update(path for path in reference.rglob("*") if path.is_file()
                              and path.suffix in (".json", ".csv"))
     return sorted(path for path in files if path.is_file())
 
 
-def package(args):
+def package(args, summarizer=None):
     root = ensure_output_path(args.output_dir)
     # Rebuild and validate the summary first; packaging cannot imply completion.
-    summarize(args)
+    (summarizer or summarize)(args)
     _, payload = study.read_plan(root / "plan.json")
     summary = json.loads((root / "analysis/summary.json").read_text())
     if summary["status"] != "complete" and not args.allow_incomplete:

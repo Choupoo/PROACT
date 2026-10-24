@@ -1,0 +1,504 @@
+% Chapter fragment: input this file from the thesis; do not add a second document environment.
+\section{Background and Related Work}
+\label{sec:background}
+
+New training data affect more than a continual learner's performance on its
+current task. They can also change what it remembers from earlier tasks.
+This makes the training data a possible route for an attack on knowledge
+the model has already acquired. Detecting such an attack requires some
+understanding of how the learner updates, what the attacker can change,
+and which model responses are available before training begins.
+
+\subsection{Continual Learning and Forgetting}
+\label{subsec:bg-continual-learning}
+
+Continual learning studies models that learn from a sequence of tasks or
+data distributions. The difficulty is to learn new information while
+retaining earlier knowledge. Training on a new task can change shared
+parameters in ways that substantially reduce accuracy on previous tasks,
+an effect known as catastrophic forgetting~\cite{parisi2019continual}.
+Some protocols allow earlier examples to be stored and replayed; others
+require learning to continue without them.
+
+Let $D_t=\{(x_i,y_i)\}_{i=1}^{N_t}$ denote the training set of task $t$,
+with tasks indexed from zero. A learner enters task $t$ with parameters
+$\theta_{t-1}$ and produces $\theta_t$ after training on $D_t$. Minimising
+the current empirical loss,
+\begin{equation}
+    \mathcal{L}_t(\theta)
+    = \frac{1}{N_t}\sum_{(x,y)\in D_t}
+      \ell\bigl(f_\theta(x,t),y\bigr),
+    \label{eq:bg-current-loss}
+\end{equation}
+places no explicit constraint on performance on $D_0,\ldots,D_{t-1}$.
+Here the argument $t$ allows a task-specific output head to be selected;
+the class of $x$ remains to be predicted.
+
+The balance between retaining earlier knowledge and adapting to new data
+is usually described as the stability--plasticity trade-off. Replay methods
+revisit stored or generated examples. Parameter-isolation methods allocate
+model capacity to different tasks. Regularisation methods penalise changes
+to parameters or predictions associated with earlier knowledge
+\cite{parisi2019continual}. The experiments here focus on this last group
+and examine its behaviour when the new training data are deliberately
+modified.
+
+\subsubsection{Task Identity and Class Labels}
+
+Van de Ven and Tolias distinguish three evaluation scenarios according to the
+information available at test time~\cite{vandeven2019scenarios}. In
+task-incremental learning, task identity is provided and can select the
+appropriate output head. In class-incremental learning, the model must
+classify among the classes encountered so far without being told the task.
+In domain-incremental learning, the input distribution changes while the
+required output space remains shared, and task identity is not provided.
+These scenarios impose different demands on the classifier and need to be
+distinguished when comparing results.
+
+The learner used here is task-incremental and has a separate head for each
+task. The incoming task and its output space are known, but the detector
+must score images without their true class labels. Its supervised training
+uses a different label: whether an image is clean or artificially poisoned.
+Those labels are available in the controlled source experiment and absent
+when a new dataset is scored. Task identity, image class and clean/poison
+status therefore have separate roles throughout the thesis.
+
+\subsubsection{Measuring Retention}
+
+Let $a_{t,j}$ be the test accuracy on task $j$ after learning task $t$.
+The resulting accuracy matrix records both learning and retention. Following
+the backward-transfer formulation of Lopez-Paz and Ranzato
+\cite{lopezpaz2017gem}, the average change on earlier tasks after learning
+task $t\geq 1$ is
+\begin{equation}
+    \operatorname{BWT}_t
+    = \frac{1}{t}\sum_{j=0}^{t-1}(a_{t,j}-a_{j,j}).
+    \label{eq:bg-bwt}
+\end{equation}
+A negative value means that earlier-task accuracies have declined, on
+average, from their immediate post-training values. The mean historical
+accuracy is
+\begin{equation}
+    A_t^{\mathrm{past}}=\frac{1}{t}\sum_{j=0}^{t-1}a_{t,j},
+    \label{eq:bg-past-accuracy}
+\end{equation}
+which measures the performance that remains after the update. Both quantities
+are useful: a small backward-transfer loss can hide poor historical accuracy
+if the earlier tasks were never learned well.
+
+Since clean sequential training can itself cause forgetting, poisoning needs
+a paired control. Starting from the same pre-update checkpoint, the learner
+is trained separately on clean and poisoned versions of the incoming task.
+The difference
+$A_{t,\mathrm{clean}}^{\mathrm{past}}-
+ A_{t,\mathrm{poison}}^{\mathrm{past}}$ then describes the extra historical
+accuracy loss attributable to the changed data in that experiment. Measuring
+the benefit of a detector would require a further training run in which its
+decisions are used to filter the data or modify learning.
+
+\subsection{Regularisation-Based Continual Learning}
+\label{subsec:bg-regularisation}
+
+Several methods considered here use a parameter penalty of the general form
+\begin{equation}
+    \mathcal{L}_t^{\mathrm{CL}}(\theta)
+    = \mathcal{L}_t(\theta)
+      +\frac{\lambda}{2}\sum_r
+       \Omega_{t-1,r}(\theta_r-\bar\theta_{t-1,r})^2.
+    \label{eq:bg-regularisation}
+\end{equation}
+Here $r$ indexes scalar parameters, $\bar\theta_{t-1}$ is a retained reference
+parameter vector, and $\Omega_{t-1,r}$ measures importance. Methods differ
+in how these quantities are estimated and updated. A larger penalty restricts
+movement in important coordinates, preserving earlier knowledge at the
+possible cost of slower adaptation to the new task.
+
+\subsubsection{Elastic Weight Consolidation}
+
+Elastic Weight Consolidation (EWC) estimates parameter importance using a
+diagonal approximation to the Fisher information~\cite{kirkpatrick2017ewc}.
+For a previous task $A$, its two-task penalty is
+\begin{equation}
+    \mathcal{L}_{\mathrm{EWC}}(\theta)
+    = \mathcal{L}_t(\theta)
+      +\frac{\lambda}{2}\sum_r
+       F_{A,r}(\theta_r-\theta_{A,r}^{*})^2.
+    \label{eq:bg-ewc}
+\end{equation}
+Larger Fisher values give stronger constraints. The penalty follows from a
+local approximation to the posterior after the earlier task. Using only the
+diagonal makes it practical to compute, at the cost of omitting interactions
+between parameters. Extending EWC to a task sequence also requires choosing
+how to retain or combine importance estimates.
+
+EWC's accumulated importance values control the training update. By
+contrast, the detector's gradient norms describe the response of a frozen
+model to one image. Although both involve gradients, they measure different
+quantities.
+
+\subsubsection{Memory Aware Synapses and Riemannian Walk}
+
+Memory Aware Synapses (MAS) measures importance through the sensitivity of
+the network's output function to parameter changes
+\cite{aljundi2018mas}. Unlike a loss-based importance estimate, this
+calculation can use unlabelled inputs. Parameters judged important are then
+protected during subsequent learning. The unlabelled part of MAS is this
+importance estimate; the task classifier is still trained with class labels.
+
+Riemannian Walk (RWalk) combines Fisher-based information with a
+training-path contribution to parameter importance
+\cite{chaudhry2018rwalk}. Its formulation connects changes in model
+distributions with the optimisation trajectory. Chaudhry et al. also
+distinguish forgetting from intransigence, the difficulty of acquiring new
+knowledge. A method that barely changes its parameters may retain earlier
+predictions but learn the incoming task poorly, so retention and new-task
+accuracy need to be examined together.
+
+\subsubsection{Auxiliary-Network Approaches}
+
+Active Forgetting with synaptic Expansion--Convergence (AFEC) addresses
+negative transfer from earlier knowledge to a new task
+\cite{wang2021afec}. It introduces additional parameters for learning the
+new task and then selectively combines them with the existing network.
+This allows earlier constraints to be relaxed where they obstruct learning
+the new task.
+
+Auxiliary Network Continual Learning (ANCL) also introduces an auxiliary
+network, but uses it to provide a plasticity-oriented reference for the main
+learner~\cite{kim2023ancl}. Its regulariser balances the previous model and
+the auxiliary solution. The shared use of an auxiliary network thus serves
+different formulations in AFEC and ANCL. Their EWC-based variants are
+included in the experimental comparison.
+
+\subsection{Data Poisoning and Forgetting-Inducing Attacks}
+\label{subsec:bg-poisoning}
+
+In a poisoning attack, the adversary changes data on which the victim will
+train. In an evasion attack, the adversary instead changes an input to a
+fixed, trained model. Poisoning therefore acts through the learner's update:
+the modified data must cause damage after they have been used for training.
+For example, Biggio et al. optimise an injected SVM training point to
+increase a downstream validation loss~\cite{biggio2012poisoning}. An input's
+difficulty before training is only part of this problem.
+
+A poisoning objective can be written schematically as
+\begin{align}
+    \max_{\Delta\in\mathcal{C}}\quad&
+      \mathcal{J}\bigl(\theta^{+}(\Delta)\bigr),\label{eq:bg-poison-outer}\\
+    \text{where}\quad&
+      \theta^{+}(\Delta)=
+      \mathcal{A}(\theta^{-},D_t^{\Delta}).\label{eq:bg-poison-inner}
+\end{align}
+Here $\mathcal{A}$ is the victim's update procedure, $\theta^{-}$ is its
+pre-update state, and $\mathcal{C}$ specifies the attacker's permitted
+changes. The outer objective $\mathcal{J}$ measures the attacker's desired
+damage. The update operator $\mathcal{A}$ can represent a finite training
+schedule, as well as an approximate solution to a learning objective.
+
+For additive image poisoning, the modified input can be represented as
+$\widetilde{x}_i=\Pi_{[0,1]^d}(x_i+\delta_i)$, with
+$\|\delta_i\|_\infty\leq\varepsilon$. The projection keeps pixel values in
+range. The budget $\varepsilon$ bounds the change to each pixel. The
+poisoning fraction specifies how many images are changed. These are separate
+settings: small perturbations may be applied to every image, or larger
+perturbations to only a few.
+
+\subsubsection{BrainWash}
+
+BrainWash targets the retention of earlier tasks rather than only the
+accuracy of the incoming task~\cite{abbasi2024brainwash}. The attacker has
+access to the learned model and incoming-task data, but not the original
+historical training sets. It first synthesises historical inputs through
+model inversion, then uses them to optimise perturbations that make a
+subsequent update damage earlier-task performance.
+
+In the reckless setting, the attacker seeks forgetting without requiring
+good performance on the incoming task. In the cautious setting, the attack
+also seeks to preserve incoming-task accuracy, so monitoring that accuracy
+alone may miss the damage. Both use constrained input perturbations,
+optimised through an approximation to a bilevel objective
+\cite{abbasi2024brainwash}.
+
+For detection, the relevant point is that damage to historical tasks may
+remain hidden by acceptable performance on the new task. Historical retention
+and incoming-task accuracy are therefore measured separately. The attack
+budgets and optimisation settings used here are given in the experimental
+setup.
+
+\subsubsection{Poisoning Detection and Existing Defences}
+
+Backdoor defences provide related but different detection settings. Spectral
+Signatures identifies unusual directions in learned representations and uses
+them to detect and remove poisoned examples~\cite{tran2018spectral}. This
+work uses representations to reveal contamination that ordinary test
+accuracy can overlook. Its setting is a classifier trained on backdoored
+data, whereas the detector here examines a new task before learning it.
+Whether comparable signals exist at this earlier stage must be tested.
+
+A detection score also needs to be distinguished from a training defence.
+The former identifies suspicious data; the latter acts on the learning
+procedure, for example by filtering images or constraining updates. The
+experiments build on the PROACT repository, which already contains
+training-time defence components~\cite{proactsoftware}. The detector is a
+separate addition. Assessing whether its alerts improve retention would
+require using them during training, beyond measuring detection and attack
+effectiveness separately.
+
+\subsection{Model Inversion as Historical Reference Data}
+\label{subsec:bg-inversion}
+
+Model inversion synthesises inputs using information contained in a trained
+model. DeepInversion optimises image inputs while keeping the network
+fixed~\cite{yin2020deepinversion}. A classification objective encourages
+the requested class, while image priors and BatchNorm feature-statistic
+constraints guide synthesis. The stored BatchNorm statistics help constrain
+the otherwise underdetermined search: many inputs can produce a desired
+network output.
+
+The resulting images are synthetic inputs, rather than recovered copies of
+the original training set. Matching selected feature statistics still leaves
+room for differences from real images. Smith et al. examine this difficulty
+in data-free class-incremental learning~\cite{smith2021dreaming}: replaying
+inverted images with standard distillation is insufficient on common
+benchmarks, motivating changes to the learning procedure. Their problem is
+different from detection, but it illustrates why the quality of a synthetic
+reference needs to be examined rather than assumed.
+
+Inversion serves two purposes in these experiments. It supplies the attacker
+with a surrogate for inaccessible historical data, and supplies the
+label-free detector with historical reference images. These uses place
+different demands on the samples. Images that help construct a damaging
+update need not be representative enough to calibrate a clean-data test.
+The reference-based detector consequently relies both on the historical
+checkpoints being clean and on the adequacy of the synthetic references.
+
+\subsection{Model-Based Descriptors and Detection Scores}
+\label{subsec:bg-descriptors}
+
+The frozen learner provides several ways to describe an incoming image.
+Its output probabilities give the head's response, activations give its
+internal representation, and loss gradients measure local parameter
+sensitivity. These descriptors can be supplied to a classifier or compared
+across datasets without training the learner on the incoming images.
+
+\subsubsection{Gradients and Their Limits}
+
+For a differentiable loss, write
+$g(x,y)=\nabla_\theta\ell(f_\theta(x),y)$. A small gradient step on $(x,y)$
+changes parameters approximately by $-\eta g(x,y)$. If
+$\mathcal{L}_{\mathrm{past}}$ is a differentiable historical loss, a
+first-order expansion gives
+\begin{equation}
+ \mathcal{L}_{\mathrm{past}}(\theta-\eta g)
+ -\mathcal{L}_{\mathrm{past}}(\theta)
+ \approx -\eta\,\nabla_\theta\mathcal{L}_{\mathrm{past}}(\theta)^\top g.
+ \label{eq:bg-gradient-interference}
+\end{equation}
+The inner product determines whether this small step increases or decreases
+historical loss. Gradient magnitude alone omits that direction information.
+This is a local explanation of interference; a full training update also
+involves successive steps, regularisation and changes in the representation.
+
+Influence functions provide a related approach to studying how training
+examples affect model predictions~\cite{koh2017influence}. They account
+for local curvature through the training objective, rather than assigning
+influence from a raw gradient norm alone. The descriptors used here retain
+less information: they summarise gradients without estimating the curvature
+or the eventual effect of an image on training.
+
+Gradient magnitude can be summarised at different scales. If the backbone parameters are
+partitioned into tensors $\theta^{(1)},\ldots,\theta^{(q)}$, one can record
+$\|\nabla_{\theta^{(j)}}\ell\|_2$ for every tensor. This is one feature for
+an entire weight or bias tensor, not one feature per scalar parameter. A
+stage norm instead combines several tensors. For a disjoint partition,
+\begin{equation}
+ \|\nabla_\theta\ell\|_2^2
+ =\sum_{j=1}^{q}\|\nabla_{\theta^{(j)}}\ell\|_2^2.
+ \label{eq:bg-gradient-partition}
+\end{equation}
+Tensor norms retain the distribution of gradient magnitude within a stage,
+which the stage norm combines into a single value. They also increase
+dimensionality and depend on tensor size and parameterisation. Comparing
+the two representations tests whether that additional detail helps detection.
+
+Computing a loss gradient normally requires a class target. Since the
+detector lacks the true incoming class, it uses the model's predicted class
+as a fixed pseudo-target for differentiation. The gradient then measures
+sensitivity relative to that prediction, including when it is incorrect.
+The method chapter specifies this construction and the fixed incoming head
+used to obtain it.
+
+\begin{samepage}
+\subsubsection{Predictions and Activations}
+
+For predicted probabilities $p$, entropy is
+\mbox{$H(p)=-\sum_c p_c\log p_c$}. Other summaries are the maximum probability
+and the gap between the two largest values. Hendrycks and Gimpel use maximum
+softmax probability as a baseline for identifying misclassified and
+out-of-distribution inputs~\cite{hendrycks2017baseline}. Low confidence
+can thus be useful for identifying unfamiliar inputs, although unfamiliarity
+can arise from clean task changes as well as poisoning.
+\par
+\end{samepage}
+
+Guo et al.~\cite{guo2017calibration} show that modern trained neural networks
+can produce probabilities that are poorly calibrated to classification
+correctness. Here the incoming head has not yet been trained on its task,
+so its probability vector is used as a model response rather than a
+calibrated estimate of correctness. The activation norm adds a measurement
+of representation magnitude. Any association between these responses and
+poisoning is learned or tested in the detection experiment.
+
+\subsubsection{Ranking, Calibration and Dataset Decisions}
+
+A supervised detector maps descriptors $z(x)$ to a scalar score, for
+example through logistic regression,
+\begin{equation}
+ s(x)=\sigma\bigl(w^\top\widetilde z(x)+b\bigr),\qquad
+ \sigma(u)=\frac{1}{1+e^{-u}},
+ \label{eq:bg-logistic-score}
+\end{equation}
+where $\widetilde z$ denotes descriptors transformed using source-fitted
+scaling. The binary target distinguishes clean and poisoned images. The
+score lies between zero and one, but its probabilistic interpretation depends
+on the training population and class proportions. A balanced source
+experiment alone cannot calibrate it for deployment on a different task.
+
+ROC analysis evaluates how examples are ordered as the decision threshold
+varies~\cite{fawcett2006roc}. A high ROC-AUC can therefore coexist with
+poor decisions at one frozen cutoff. After task transfer, for example, clean
+and poisoned scores may both shift while their relative ordering remains
+largely unchanged.
+
+Probability calibration concerns agreement between predicted probabilities
+and observed frequencies~\cite{guo2017calibration}. Threshold calibration
+has a narrower purpose: choosing a cutoff for a decision rule. Here that
+cutoff is estimated from historical data and frozen before the target task.
+Its error rate on the target remains something to measure.
+
+A sample score can be turned into a dataset alert by counting the images
+above a cutoff $u$:
+\begin{equation}
+ K(D)=\sum_{i=1}^{n}\mathbf{1}\{s(x_i)\geq u\}.
+ \label{eq:bg-dataset-count}
+\end{equation}
+A count rule alerts when $K(D)\geq k$. Under independent clean-image
+alarms with a common probability $p$, the count has a
+$\operatorname{Binomial}(n,p)$ distribution. A one-sided Clopper--Pearson
+bound can account for uncertainty in $p$ estimated from a separate clean
+sample~\cite{clopper1934binomial}. This calculation relies on the clean-image
+alarm probability remaining stable. Task shift can violate that assumption.
+The number of distinct calibration images also matters: repeatedly drawing
+datasets from the same finite pool does not supply new independent images.
+
+\subsection{Historical-Reference Distribution Tests}
+\label{subsec:bg-reference-tests}
+
+Without labelled clean/poison examples, historical data offer a possible
+reference for incoming descriptors. Such a comparison tests a property of
+the data distributions, rather than the cause of a difference. New classes
+and imperfect inversion samples can produce clean distribution shifts;
+conversely, poisoning may leave the property being tested almost unchanged.
+
+\subsubsection{Maximum Mean Discrepancy}
+
+Maximum mean discrepancy (MMD) compares distributions through their
+embeddings in a reproducing kernel Hilbert space
+\cite{gretton2012mmd}. For independent $Z,Z'\sim P$ and $W,W'\sim Q$,
+its squared population value is
+\begin{equation}
+ \operatorname{MMD}^2(P,Q)
+ =\mathbb{E}k(Z,Z')+\mathbb{E}k(W,W')-2\mathbb{E}k(Z,W).
+ \label{eq:bg-mmd}
+\end{equation}
+A characteristic kernel distinguishes unequal distributions at the
+population level. A finite-sample test still depends on sample size,
+kernel choice and the reference data. Random Fourier features approximate
+shift-invariant kernels by finite-dimensional inner products, reducing
+the cost of repeated comparisons~\cite{rahimi2007random}.
+
+This sensitivity also presents a difficulty for historical references.
+Synthetic historical images and real incoming images may differ even when
+both are clean. In that case, rejecting equality is consistent with the
+statistical question but unhelpful for identifying poisoning. A permutation
+test requires exchangeability under its null, which the clean status of
+the two groups alone cannot establish. Clean-alert and attack-detection
+rates are therefore both needed to assess this baseline.
+
+\subsubsection{Kendall Correlations and Rank Dependence}
+
+Kendall's rank correlation compares the ordering of paired observations
+\cite{kendall1938rank}. For descriptor coordinates $a$ and $b$, the
+tau-a statistic is
+\begin{equation}
+ \widehat\tau_{ab}
+ =\frac{2}{n(n-1)}\sum_{i<j}
+   \operatorname{sign}(z_{ia}-z_{ja})
+   \operatorname{sign}(z_{ib}-z_{jb}).
+ \label{eq:bg-kendall}
+\end{equation}
+Concordant orderings contribute $+1$, discordant orderings $-1$, and ties
+zero. Tau-a is not the tie-normalised tau-b statistic. A vector of these
+coefficients describes pairwise rank dependence across a dataset.
+
+Strictly increasing transformations of individual coordinates leave these
+orderings unchanged. A rank comparison ignores these marginal changes,
+allowing some scale differences between tasks to be removed. It also misses
+an attack expressed entirely through such transformations. More generally,
+pairwise Kendall coefficients describe only part of the joint distribution;
+higher-order dependence may change while these coefficients stay fixed.
+
+I use the name \emph{Rank} for the historical-reference test built from
+these coefficients. The descriptors are measured per image, but the
+correlations summarise a whole dataset. This gives a dataset-level
+comparison without first classifying individual images as clean or
+poisoned. The test statistic and the rule for combining historical
+comparisons are described in the method chapter.
+
+\subsubsection{Jackknife Variation and Bootstrap Approximation}
+
+Correlation estimates vary with the sampled images. The jackknife measures
+this variation by leaving out observations in turn
+\cite{efron1981jackknife}. For a statistic $T_n$
+and its leave-one-out value $T_{n,-i}$, the pseudovalue is
+\begin{equation}
+ P_i=nT_n-(n-1)T_{n,-i}.
+ \label{eq:bg-jackknife}
+\end{equation}
+Variation across the pseudovalues estimates first-order variability in the
+statistic. When that variation is effectively zero, a first-order
+approximation becomes degenerate and needs separate treatment.
+
+Gaussian multiplier methods approximate sampling errors using random
+weights applied to estimated observation contributions. Chen develops
+Gaussian and bootstrap approximations for nondegenerate, high-dimensional
+U-statistics, including jackknife-based multiplier procedures
+\cite{chen2018bootstrap}. Kendall coefficients are order-two U-statistics,
+which makes this framework relevant to comparing correlation profiles.
+Applying it here still requires assumptions about independence and
+nondegeneracy. These are particularly important for synthetic inversion
+samples. The implemented two-sample procedure is an approximation, rather
+than a finite-sample guarantee supplied by Chen's result.
+
+The bootstrap draws simulate fluctuations of the statistic conditional on
+the observed images; the image sample itself stays fixed. The resulting
+p-value concerns a null hypothesis about rank dependence, not the
+probability of poisoning. Rejection and non-rejection must be interpreted
+within that scope, with non-rejection leaving open changes that the test
+has little power to detect.
+
+\subsection{Scope of This Thesis}
+\label{subsec:bg-scope}
+
+The remaining question is how useful these measurements are before a new
+task is learned. The supervised approach asks whether source-trained scores
+and historical thresholds transfer to a later task. The label-free approach
+asks whether inversion references support useful dataset comparisons without
+examples labelled as poisoned. Both depend on how model responses change
+across tasks, but they use different information and make different assumptions.
+
+The CL algorithms, BrainWash attack and inversion procedure are existing
+components. This work develops the detector around them, compares gradient
+granularities and feature groups, and examines where the resulting decisions
+work or fail. The next chapter defines the information available to the
+detector and attacker before describing these methods in detail.

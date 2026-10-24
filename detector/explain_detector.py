@@ -20,7 +20,8 @@ from detector.io_utils import (
     read_feature_table,
 )
 from detector.train_detector import compare_feature_sets, validate_feature_table
-from detector.transfer_detector import fresh_output, prepare_features
+from detector.transfer_core import TRANSFER_PROTOCOL
+from detector.transfer_detector import fresh_output, prepare_features, validate_table
 
 SHAP_SOURCE = (
     "https://shap.readthedocs.io/en/latest/generated/shap.LinearExplainer.html"
@@ -74,7 +75,16 @@ def feature_family(name):
 
 
 def explain(table, metadata, bundle, output, split="validation", ablations=False):
-    validate_feature_table(table)
+    is_transfer = bundle.get("kind") == TRANSFER_PROTOCOL
+    if is_transfer:
+        validate_table(table, metadata)
+        if metadata["features_sha256"] != bundle["source_metadata"]["features_sha256"]:
+            raise ValueError("Explanation requires the original frozen source training feature file.")
+        if ablations:
+            raise ValueError("Use the registered advisor-study ablations for transfer bundles; "
+                             "legacy --ablations does not preserve historical calibration.")
+    else:
+        validate_feature_table(table)
     if bundle.get("negative_policy", "clean_only") != "clean_only" and ablations:
         raise ValueError(
             "Legacy ablations omit random-control negatives; use the registered negative-policy comparison."

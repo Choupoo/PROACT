@@ -1,10 +1,10 @@
-# Meeting 3：服务器运行指南
+# Meeting 3 server commands
 
-代码已提供；本机 CPU 测试不能证明真实 GPU 全流程成功，更不能证明迁移有效。
-请先同步新的 `detector/` 代码，保留服务器原 `work/` 和 `results/`。
-以下服务器根目录采用你之前提供的 `/home/p.zhang/PROACT`；不是 Mac 路径。
+Historical commands for the true-class source-to-target protocol in
+[MEETING3_PROTOCOL.md](MEETING3_PROTOCOL.md). For current predicted-class runs,
+use [ADVISOR_FINAL_RUN.md](ADVISOR_FINAL_RUN.md).
 
-## 1. 检查环境
+## Environment
 
 ```bash
 conda activate proact38
@@ -15,14 +15,14 @@ python -B -m detector.doctor --require-cuda
 python -B -m unittest discover -s detector/tests -q
 ```
 
-新代码保持 Python 3.8 语法，无须安装 SHAP 包；仍使用项目已有 torch、torchvision、
-NumPy、pandas、SciPy、scikit-learn、joblib、matplotlib。只加载可信 checkpoint/joblib 文件。
-先保证以上检查通过，不为了运行新代码盲目升级服务器的 torch/torchvision。
+Use the existing compatible torch/torchvision and numerical stack. Linear SHAP
+is implemented directly; no SHAP package installation is required. Only load
+trusted serialized artifacts.
 
-## 2. 正式实验：第二任务训练，第十任务检测
+## Register and run
 
-以下 plan 只生成协议及脚本，不启动训练。**必须在 GPU 服务器上生成 plan**：
-脚本会登记服务器解释器、目录、源代码哈希；不要把 Mac 生成的脚本直接搬到服务器运行。
+Register on the GPU server: generated paths and source hashes belong to that
+machine. Preserve old outputs and do not change code during an active run.
 
 ```bash
 python -B -m detector.transfer_pipeline plan \
@@ -36,52 +36,39 @@ python -B -m detector.transfer_pipeline run \
 bash detector/work/meeting3_transfer_v1/commands.sh
 ```
 
-正式默认参数见协议：victim 20 epochs、inversion 10,000 iterations、attack 5,000 epochs。
-两种固定特征组都会执行。默认按 seed 顺序串行执行，不会自动占用所有 GPU。
-一个 seed 需要在源任务和目标任务各运行训练、反演、攻击与 clean/poison 效果评估，
-然后提取特征；这不是只重跑 CPU 分类器的小任务。
+The plan uses 20 victim epochs, 10,000 inversion iterations and 5,000 attack
+epochs. Each seed generates source and target artifacts, extracts features and
+evaluates the two fixed feature sets. Seeds run sequentially by default.
 
-如需两张 GPU 并行，可在**不同 tmux 会话、不同输出目录**各登记一个 seed，
-随后分别运行对应脚本；此时各目录是单 seed 报告，不会自动合并成一份跨目录汇总：
+For separate single-seed plans in different tmux windows:
 
 ```bash
-# 第一会话
+# First window.
 CUDA_VISIBLE_DEVICES=0 python -B -m detector.transfer_pipeline plan \
   --output-dir detector/work/meeting3_transfer_seed3 --seeds 3
 CUDA_VISIBLE_DEVICES=0 bash detector/work/meeting3_transfer_seed3/commands.sh
 
-# 第二会话
+# Second window.
 CUDA_VISIBLE_DEVICES=1 python -B -m detector.transfer_pipeline plan \
   --output-dir detector/work/meeting3_transfer_seed4 --seeds 4
 CUDA_VISIBLE_DEVICES=1 bash detector/work/meeting3_transfer_seed4/commands.sh
 ```
 
-已有空闲 tmux 会话可以直接运行；新建可用 `tmux new -s meeting3`。
-`Ctrl+B` 再 `D` 只脱离会话，不中断任务；`Ctrl+C` 会中断。
-下载/CUDA/训练失败后日志保留，`run_state.json` 标记失败；脚本不会把部分结果当完成。
-再次运行会跳过校验通过的完整步骤，但遇到失败/中断步骤会停下。
-不要手改状态为 complete 或删除校验：先检查日志，修复后选择新目录重跑；
-若要复用昂贵的完整上游产物，应先逐项核验并另行制定恢复方案。
-运行期间不要更换方法代码或环境版本。
+These directories contain separate reports, not an automatically merged summary.
+Detach with `Ctrl+B`, then `D`. Failures leave logs and state; rerunning verifies
+and skips completed steps but stops at failed/incomplete steps. Inspect the
+failure and use a new directory rather than editing completion flags or hashes.
 
-可选扩展必须在观察结果前单独登记：`--targets 4 9` 增加中期任务；
-`--label-mode predicted` 使用预测类别。两者都要新 output-dir，不覆盖主实验。
+Optional `--targets 4 9` or `--label-mode predicted` changes require a separate
+plan fixed before target inspection.
 
-## 3. 已有模型的特征解释与报告核对
-
-先在服务器核对会议上 86.4% 对应哪个模型/数据分区，不能从汇总数字猜模型：
+## Audit or explain an earlier detector
 
 ```bash
 python -B -m detector.meeting_audit \
   --roots detector/results detector/work/full_v2_seed0_proact38 \
   --output-dir detector/work/meeting3_existing_audit
-```
 
-已有正式 pipeline 的样本模型是 `sample/detector_bundle.joblib`，特征是 `features.csv`；
-运行前确认源目录确实存在这两个文件和各自校验文件。若配置选择了其他 label mode，
-必须使用对应模型当初实际训练的特征，不能混用 `predicted_features.csv`。
-
-```bash
 python -B -m detector.explain_detector \
   --features detector/work/full_v2_seed0_proact38/features.csv \
   --bundle detector/work/full_v2_seed0_proact38/sample/detector_bundle.joblib \
@@ -89,41 +76,25 @@ python -B -m detector.explain_detector \
   --ablations
 ```
 
-若目录不是这个名字，请替换为模型的真实来源路径。脚本校验失败应找回完整原产物，
-不要改哈希绕过校验。只有 `metrics.json` / `report.md` 无法还原 SHAP。
-需要 `features.csv`、同名 `.metadata.json`、模型 `.joblib` 及其
-同名 `.joblib.sha256.json` 校验文件（旧模型名为 `detector_bundle`，新迁移模型名为 `bundle`）。
+Use the actual matching feature/model paths and label mode. Explanation needs the
+CSV, metadata, bundle and checksum; metrics alone cannot reconstruct SHAP. These
+legacy explanation commands are not instructions for current advisor bundles.
 
-## 4. 输出目录与发回文件
+## Outputs
 
-```text
-detector/work/meeting3_transfer_v1/
-  protocol.json / run_environment.json / run_state.json
-  commands.sh / logs/
-  summary.json / summary.md                    # 所有种子完成后生成
-  seed3/                                      # seed4 相同结构
-    artifacts_task1/                          # data、victim、inversions、attack
-      effectiveness/metrics.json              # 以及 clean/poison accuracy matrices
-    artifacts_task9/
-    features_task1/                           # CSV、metadata、manifest、references
-    features_task9/
-    source_portable/                          # 冻结 bundle、SHA、fit_metrics
-    source_extended/
-    explain_portable/                         # SHAP、图、相关矩阵、示例
-    explain_extended/                         # 另含 validation 消融
-    evaluate_task1_portable/                  # 源任务 test 对照
-    evaluate_task1_extended/
-    evaluate_task9_portable/                  # 目标 test；指标、rates、ROC、预测、图
-    evaluate_task9_extended/
-```
+The root contains `protocol.json`, `commands.sh`, environment/state, logs and,
+after all seeds finish, `summary.json` and `summary.md`. Each seed contains:
 
-首轮分析请发：根目录四份 JSON/MD 汇总与协议、run_state/run_environment，以及每 seed 的
-两个 `effectiveness/metrics.json`、两个 `source_*/fit_metrics.json`、所有
-`evaluate_*/evaluation_metrics.json` 和 `rates.csv`、两个 `explain_*/` 中的
-`explanation.json`、`feature_importance.csv`、`family_importance.csv`、`examples.json`，
-以及 extended 的 `feature_comparison_validation.csv`。也可以直接打包这些报告目录。
-不必首先传巨大数据集、checkpoint、noise 或 references；需要进一步复算时再提供。
-如果失败，发 `run_state.json` 与对应 `logs/<step>.log` 最后部分。
+- `artifacts_task1/`, `artifacts_task9/`: victim, inversion, attack and effectiveness.
+- `features_task1/`, `features_task9/`: CSVs, metadata, manifest and references.
+- `source_portable/`, `source_extended/`: frozen models and fit metrics.
+- `explain_portable/`, `explain_extended/`: SHAP, correlations and examples;
+  extended also has validation ablations.
+- `evaluate_task1_*/`, `evaluate_task9_*/`: source/target test metrics,
+  rates, predictions and plots.
 
-看结果时同时检查目标 clean FPR、投毒 TPR、随机扰动告警以及攻击是否真的降低历史准确率。
-不因命令正常退出就判定研究问题已解决。
+For analysis, provide root configuration/state/summary, per-task effectiveness
+metrics, source fit metrics, evaluation metrics/rates and explanation JSON/CSVs.
+Datasets, checkpoints and full features are needed only for deeper recomputation.
+For a failure, include its stage log and state. Evaluate attack damage alongside
+clean FPR, poison TPR and random alerts.

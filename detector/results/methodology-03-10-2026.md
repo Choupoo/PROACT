@@ -1,6 +1,9 @@
 # Detector methodology: feature correction and threshold pilot
 
-This note describes the revised implementation and a proposed small pilot. It does not report new GPU results. Following the latest feedback, the multi-method, multi-attack experiments and feature ablations are deferred until we agree on the methodology.
+This note records the 3 October pilot design, before the broader experiments
+were approved. It contains no new GPU results. The subsequent
+[4 October report](result-04-10-2026.md) gives the pilot results;
+[ADVISOR_FINAL_RUN.md](../ADVISOR_FINAL_RUN.md) describes the fixed expansion.
 
 ## 1. What the detector is allowed to know
 
@@ -135,7 +138,7 @@ Rank and MMD are compared on identical bags within their evaluator. The supervis
 
 For a real incoming dataset of 150 images, the detector makes **one** dataset-level decision. Repeated bag construction is only an offline sensitivity analysis. Different dataset sizes would require a separately defined count calibration and evaluation; this implementation does not silently reuse the 150-image count cutoff.
 
-## 5. What I propose to do next
+## 5. Follow-up planned at the time
 
 First, re-extract predicted-gradient features, check that no true-class feature enters inference, and run the small threshold pilot. Existing compatible checkpoints, attack artifacts and inversion images can be reused; the old true-class feature CSVs cannot be repaired by deleting or renaming columns.
 

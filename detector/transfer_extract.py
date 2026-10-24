@@ -27,16 +27,41 @@ from detector.extract_features import (
     extract_one,
     matched_random_noise,
 )
-from detector.io_utils import DETECTOR_ROOT, ensure_output_path
+from detector.io_utils import DETECTOR_ROOT, ensure_output_path, read_feature_table
 from detector.train_detector import feature_sets, validate_feature_table
+from detector.image_data import dataset_spec, task_order
 from detector.transfer_core import (
-    TASK_ORDER,
     TRANSFER_PROTOCOL,
     fixed_dataset_specs,
     load_defender,
     validate_artifact,
     validate_checkpoint,
 )
+
+
+def reusable_controls(path, metadata, delta):
+    """Reuse only identical frozen-model measurements; never reuse poison views."""
+    if not path:
+        return {}, None
+    from detector.transfer_detector import validate_table
+    table, saved = read_feature_table(path)
+    # Round-trip decimal values, rather than accepting pandas' faster parser's
+    # occasional one-ULP change in a cached measurement.
+    table = pd.read_csv(path, float_precision="round_trip")
+    validate_table(table, saved)
+    keys = ("dataset", "dataset_sha256", "checkpoint_sha256", "inversion_sha256",
+            "task_index", "head_seed", "feature_seed", "split_seed", "label_mode",
+            "random_control_seed", "gradient_target", "inference_schema")
+    if any(saved.get(k) != metadata.get(k) for k in keys):
+        raise ValueError("Control cache has incompatible data/model/extraction provenance.")
+    if saved.get("random_control") != "uniform":
+        raise ValueError("Control reuse requires registered uniform perturbations.")
+    views = ["clean"]
+    if float(saved["attack_config"]["delta"]) == float(delta):
+        views.append("random_control")
+    rows = {(int(row["original_index"]), row["view"]): row
+            for row in table.loc[table.view.isin(views)].to_dict("records")}
+    return rows, dict(features_sha256=saved["features_sha256"], path=str(Path(path).resolve()), views=views)
 
 
 def scoped_dataset(checkpoint, output):
@@ -57,6 +82,8 @@ def main(args):
     inference_schema = getattr(args, "inference_schema", False)
     if inference_schema and args.label_mode != "predicted":
         raise ValueError("Inference schema requires predicted gradients.")
+    if getattr(args, "reuse_controls", None) and getattr(args, "random_control", "matched") != "uniform":
+        raise ValueError("Control reuse requires --random-control uniform.")
     output = ensure_output_path(args.output_dir)
     if output.exists():
         raise FileExistsError(
@@ -64,22 +91,31 @@ def main(args):
         )
     checkpoint = load_pickle(args.checkpoint)
     task = validate_checkpoint(checkpoint, args.incoming_task)
+    dataset = checkpoint["dataset"]
+    spec = dataset_spec(dataset)
+    registration = None
+    if getattr(args, "data_manifest", None):
+        registration = json.loads(Path(args.data_manifest).read_text())
+        if registration["dataset"] != dataset:
+            raise ValueError("Checkpoint/data registration mismatch.")
     artifact = load_pickle(args.artifact)
     validate_artifact(artifact, checkpoint)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable.")
-    data, _, _, _, _ = scoped_dataset(checkpoint, output)
+    data, _, _, _, _ = scoped_dataset(dict(checkpoint, data_registration=registration)
+                                     if registration else checkpoint, output)
     incoming = data["train"][task]
     targets = torch.as_tensor(incoming.targets).long().cpu().numpy()
-    if len(targets) != 5000 or not np.array_equal(np.bincount(targets), [500] * 10):
-        raise ValueError("Expected 500 CIFAR training originals per incoming class.")
+    if not np.array_equal(np.bincount(targets), [spec["train_per_class"]] * spec["classes_per_task"]):
+        raise ValueError("Expected all 500 training originals per incoming class.")
     manifest = create_manifest(targets, args.split_seed, 300, 50, 50)
     validate_manifest_table(manifest, targets)
     set_seed(args.feature_seed)
     model = load_defender(checkpoint, device, args.head_seed)
     before = snapshot_state_dict(model)
-    files = matching_inversion_files(args.inversion_dir, expected_count=task)
+    files = matching_inversion_files(args.inversion_dir, expected_count=task,
+                                     image_size=spec["image_size"], classes_per_task=spec["classes_per_task"])
     past, directions, records = build_past_references(
         model, files, device, args.reference_batch_size
     )
@@ -101,8 +137,8 @@ def main(args):
         "checkpoint_sha256": sha256_file(args.checkpoint),
         "inversion_sha256": inv_hash,
         "task_index": task,
-        "task_order": TASK_ORDER,
-        "class_ids": TASK_ORDER[task],
+        "task_order": task_order(dataset),
+        "class_ids": task_order(dataset)[task],
         "origin_role": "paired_benchmark",
         "reference_tasks": records,
         "feature_seed": args.feature_seed,
@@ -124,6 +160,16 @@ def main(args):
         },
         "gradient_target": "predicted_argmax" if args.label_mode == "predicted" else "ground_truth",
     }
+    if dataset != "split_cifar100":
+        if not registration:
+            raise ValueError("Prepared ImageNet extraction needs --data-manifest.")
+        metadata.update(dataset=dataset, dataset_sha256=registration["dataset_sha256"],
+                        full_training_data=True, data_registration=registration)
+    if inference_schema:
+        metadata["inference_schema"] = "predicted_without_true_class_v1"
+    cached, reuse = reusable_controls(getattr(args, "reuse_controls", None), metadata, artifact["delta"])
+    if reuse:
+        metadata["control_reuse"] = reuse
     permutation = torch.as_tensor(artifact["rnd_idx_train"]).long().cpu()
     inverse = torch.argsort(permutation)
     noise = torch.as_tensor(artifact["latest_noise"]).float().cpu()
@@ -145,7 +191,7 @@ def main(args):
             ("poison", 1, (image + delta).clamp(0, 1)),
             ("random_control", -1, (image + random_delta).clamp(0, 1)),
         ):
-            row = extract_one(
+            row = dict(cached[(index, view)]) if (index, view) in cached else extract_one(
                 model,
                 named,
                 parameters,
@@ -169,12 +215,12 @@ def main(args):
                 attack_seed=int(artifact["seed"]),
                 label_mode=args.label_mode,
                 task_index=task,
-                original_uid="cifar100:task{}:row{}".format(task, index),
+                original_uid="{}:task{}:row{}".format("cifar100" if dataset == "split_cifar100" else dataset, task, index),
             )
             rows.append(row)
         if args.log_every and (index + 1) % args.log_every == 0:
             print(
-                "Task {}: {} / 5000 originals extracted".format(task, index + 1),
+                "Task {}: {} / {} originals extracted".format(task, index + 1, len(targets)),
                 flush=True,
             )
     table = pd.DataFrame(rows)
@@ -183,7 +229,7 @@ def main(args):
         table = table.drop(columns=["true_class_probability"])
         fixed_columns.remove("true_class_probability")
         metadata["inference_schema"] = "predicted_without_true_class_v1"
-    validate_feature_table(table, fixed_columns if inference_schema else None)
+    validate_feature_table(table, fixed_columns if inference_schema else None, spec["classes_per_task"])
     assert_model_unchanged(model, before)
     output.mkdir(parents=True)
     path = output / "features.csv"
@@ -212,6 +258,8 @@ def build_parser():
     for flag in ("checkpoint", "artifact", "inversion-dir", "output-dir"):
         parser.add_argument("--" + flag, required=True)
     parser.add_argument("--incoming-task", type=int, required=True)
+    parser.add_argument("--data-manifest")
+    parser.add_argument("--reuse-controls", help="Previously extracted CSV from the same frozen checkpoint and data.")
     parser.add_argument(
         "--label-mode", choices=("ground_truth", "predicted"), default="predicted"
     )

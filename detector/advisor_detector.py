@@ -104,6 +104,13 @@ def calibrate(bundle, histories, rule, alpha=0.05, mad_multiplier=3.0):
                   mad_multiplier=mad_multiplier,
                   supervision="Source clean/attack fitting; historical clean validation/reserve calibration.",
                   count_bound_scope="Development histories only; no target-task guarantee.")
+    # fit_source's validation metrics used its original source quantile. They
+    # must not be reported as if they were computed at the new historical cutoff.
+    source_validation = histories[0][0].loc[
+        (histories[0][0].split == "validation") & histories[0][0].view.isin(["clean", "poison"])]
+    result["validation"] = base.binary_metrics(source_validation.detector_label,
+        score_images(source_validation, result), threshold)
+    result["validation_scope"] = "Source validation clean/poison, recomputed at this bundle's final threshold."
     return result
 
 

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import shlex
+import time
 
 import numpy as np
 import pandas as pd
@@ -61,6 +62,9 @@ def build_cell(root, settings, method, seed):
             steps.append(step)
         is_target = task == settings["target_task"]
         reference = task_root / "historical_reference"
+        controls = {}
+        first_controls = None
+        shared_effects = set()
         if is_target and settings["unsupervised"]:
             steps.append(dict(name="freeze_label_free", cwd=str(task_root),
                               command=command("advisor_reference", "--checkpoint", task_root / "victim/checkpoint.pkl",
@@ -78,11 +82,18 @@ def build_cell(root, settings, method, seed):
             argv = replace_flag(argv, "--output_dir", attack)
             steps.append(dict(name=prefix + "_attack", command=argv, cwd=str(task_root),
                               outputs=[str(attack / "noise.pkl")], owned=[str(attack)]))
+            reuse = controls.get(delta, first_controls) if settings.get("reuse_controls") and is_target else None
             steps.append(dict(name=prefix + "_extract", cwd=str(task_root),
                               command=command("transfer_extract", "--checkpoint", task_root / "victim/checkpoint.pkl",
                                               "--artifact", attack / "noise.pkl", "--inversion-dir", task_root / "inversions",
                                               "--incoming-task", task, "--label-mode", "predicted", "--inference-schema", "--random-control", "uniform",
+                                              *(["--data-manifest", settings["data_manifest"]] if settings.get("data_manifest") else []),
+                                              *(["--reuse-controls", reuse] if reuse else []),
                                               "--output-dir", features), outputs=[str(features)], owned=[str(features)]))
+            if is_target:
+                controls.setdefault(delta, features / "features.csv")
+                if first_controls is None:
+                    first_controls = features / "features.csv"
             if not is_target:
                 histories.append(features / "features.csv")
                 continue
@@ -93,7 +104,14 @@ def build_cell(root, settings, method, seed):
                                                 ("uniform", "poison_training", "uniform")):
                 if not settings["effectiveness"]:
                     continue
-                effect = case / "effectiveness" / label
+                if settings.get("shared_effectiveness") and label != "poison":
+                    key = "clean" if label == "clean" else "uniform_" + attack_name("budget", delta)
+                    if key in shared_effects:
+                        continue
+                    shared_effects.add(key)
+                    effect = task_root / "effectiveness_shared" / key
+                else:
+                    effect = case / "effectiveness" / label
                 argv = replace_flag(base[base_name]["command"], "--checkpoint", attack / "noise.pkl")
                 argv = replace_flag(argv, "--output_dir", effect)
                 argv = replace_flag(argv, "--approach", method)
@@ -161,10 +179,16 @@ def evaluate(args):
     save_json(result, output / "unsupervised.json")
 
 
-def effect_metrics(case, task):
+def effect_metrics(case, task, shared=False):
     result = {}
     for label, suffix in (("clean", "clean"), ("poison", "ours"), ("uniform", "uniform")):
-        path = case / "effectiveness" / label / ("acc_mat_" + suffix + ".npy")
+        if shared and label != "poison":
+            delta = float(case.name.rsplit("_", 1)[1].replace("p", "."))
+            key = "clean" if label == "clean" else "uniform_" + attack_name("budget", delta)
+            folder = case.parent / "effectiveness_shared" / key
+        else:
+            folder = case / "effectiveness" / label
+        path = folder / ("acc_mat_" + suffix + ".npy")
         matrix = np.load(path, allow_pickle=False)
         if matrix.shape != (task + 1, task + 1) or not np.isfinite(matrix).all() or np.any((matrix < 0) | (matrix > 1)):
             raise ValueError("Invalid accuracy matrix: " + str(path))
@@ -182,6 +206,9 @@ def read_plan(path):
     payload = json.loads(path.read_text())
     if fingerprint(payload["settings"]) != payload:
         raise ValueError("Registered code/settings changed. Use a new run directory; do not mix versions.")
+    settings = payload["settings"]
+    if settings.get("data_manifest") and sha256_file(settings["data_manifest"]) != settings["data_manifest_sha256"]:
+        raise ValueError("Registered data manifest changed.")
     return ensure_output_path(path.parent), payload
 
 
@@ -251,12 +278,15 @@ def execute_cell(cell, steps, payload, retry_failed):
         cwd = ensure_output_path(step["cwd"])
         cwd.mkdir(parents=True, exist_ok=True)
         try:
+            started = time.perf_counter()
             execute(step["command"], cwd=cwd, log_path=cell / "logs" / (name + ".log"), env=child_environment(cwd))
             if fingerprint(payload["settings"]) != payload:
                 raise ValueError("Code changed while running; do not combine outputs.")
-            state[name].update(status="complete", outputs=output_hashes(step["outputs"]), finished=datetime.now(timezone.utc).isoformat())
+            state[name].update(status="complete", outputs=output_hashes(step["outputs"]), finished=datetime.now(timezone.utc).isoformat(),
+                               elapsed_seconds=time.perf_counter() - started)
         except BaseException as error:
-            state[name].update(status="failed", error=str(error))
+            state[name].update(status="failed", error=str(error),
+                               elapsed_seconds=time.perf_counter() - started)
             save_json(state, state_file)
             raise
         save_json(state, state_file)
@@ -284,7 +314,7 @@ def summarize(args):
                 case = cell / ("task" + str(settings["target_task"])) / attack_name(mode, delta)
                 identity = dict(method=method, seed=seed, attack=mode, delta=delta)
                 if settings["effectiveness"]:
-                    effects.append(dict(identity, **effect_metrics(case, settings["target_task"])))
+                    effects.append(dict(identity, **effect_metrics(case, settings["target_task"], settings.get("shared_effectiveness", False))))
                 variants = supervised.INFERENCE_GROUPS if settings["ablations"] else ["inference_full"]
                 for family, variants in (("ablations", variants), ("thresholds", advisor.RULES)):
                     for variant in variants:
@@ -366,7 +396,7 @@ def summarize(args):
                    limitations=["Bags reuse finite images; summarize variability over seeds, not bags.",
                                 "Same class order and dataset; seed variation is not a new population.",
                                 "No target calibration. Failed thresholds must be reported.",
-                                "CIFAR-100 methods/attack matrix, not a replication of all BrainWash datasets.",
+                                "Dataset-specific registered matrix, not a replication of every BrainWash setting.",
                                 "No detection/filtering defense-efficacy claim."])
     save_json(summary, output / "summary.json")
     lines = ["# Predicted-gradient detector update", "", "Status: **{}**.".format(summary["status"]), "",

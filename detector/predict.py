@@ -8,6 +8,7 @@ from detector.common import sha256_file
 from detector.io_utils import ensure_output_path, load_frozen_bundle
 from detector.pipeline import child_environment, execute
 from detector.unsupervised import METHOD
+from detector.transfer_core import TRANSFER_PROTOCOL
 
 
 def main(args):
@@ -16,6 +17,11 @@ def main(args):
     inversions = Path(args.inversion_dir).resolve()
     incoming = Path(args.input_npz).resolve()
     bundle = load_frozen_bundle(bundle_path)
+    if bundle.get("kind") == TRANSFER_PROTOCOL:
+        from detector.transfer_inference import predict_incoming
+        predict_incoming(args, bundle)
+        print("Saved incoming-dataset decision:", Path(args.output_dir).resolve() / "prediction.json")
+        return
     is_unsupervised = bundle.get("method") == METHOD
     if not is_unsupervised and bundle.get("kind") not in {
         "supervised_dataset_detector_v1",

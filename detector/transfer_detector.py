@@ -153,15 +153,17 @@ def fresh_output(path):
 
 
 def validate_table(table, metadata):
+    from detector.image_data import dataset_spec
+    classes = dataset_spec(metadata.get("dataset", "split_cifar100"))["classes_per_task"]
     inference_schema = metadata.get("inference_schema")
     if inference_schema is not None:
         if inference_schema != "predicted_without_true_class_v1" or metadata.get("label_mode") != "predicted":
             raise ValueError("Invalid inference feature schema.")
         if "true_class_probability" in table:
             raise ValueError("New inference schema must omit true_class_probability.")
-        validate_feature_table(table, [c for c in FEATURE_COLUMNS if c != "true_class_probability"])
+        validate_feature_table(table, [c for c in FEATURE_COLUMNS if c != "true_class_probability"], classes)
     else:
-        validate_feature_table(table)
+        validate_feature_table(table, classes_per_task=classes)
     contract(metadata)
     for key in (
         "feature_protocol",
@@ -179,7 +181,7 @@ def validate_table(table, metadata):
     if metadata.get("attack_seed") != int(table.attack_seed.iloc[0]):
         raise ValueError("Attack seed differs between rows and metadata.")
     expected = table.original_index.map(
-        lambda i: "cifar100:task{}:row{}".format(metadata["task_index"], int(i))
+        lambda i: "{}:task{}:row{}".format(metadata.get("dataset", "cifar100"), metadata["task_index"], int(i))
     )
     if "original_uid" not in table or not (table.original_uid == expected).all():
         raise ValueError("Global original UID differs from task/original identity.")

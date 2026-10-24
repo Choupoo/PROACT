@@ -48,8 +48,13 @@ def artifact_steps(root, task, seed, settings):
         else:
             outputs = [expected]
         argv = command(
-            "transfer_upstream", "--incoming-task", task, script, "--", *arguments
+            "transfer_upstream", "--incoming-task", task,
+            *(["--data-manifest", settings["data_manifest"]] if settings.get("data_manifest") else []),
+            script, "--", *arguments
         )
+        if settings.get("dataset"):
+            if "--experiment" in argv:
+                argv[argv.index("--experiment") + 1] = settings["dataset"]
         steps.append(
             {
                 "name": name,

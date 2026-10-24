@@ -1,5 +1,7 @@
-## 1. Experiment Objective
-The goal of this experiment is to investigate whether a set of features can distinguish poisoned samples from clean samples in a continual learning setting. The detector uses three pre-training features: the loss, the backbone gradient norm, and the cosine similarity with the past-task gradient direction. In future experiments, I will consider incorporating additional features to further improve detection performance.
+# Initial three-feature experiment
+
+## 1. Objective
+This initial experiment tests three pre-training features for separating clean and poisoned images: loss, backbone gradient norm and cosine similarity with the past-task gradient direction. It uses true-class information and within-task splits; later reports evaluate the revised predicted-class detector.
 
 ## 2. Experimental Setup
 Overview of the detector pipeline, including Task 9 sample construction, feature extraction and logistic-regression detector training.
@@ -23,7 +25,7 @@ The victim model is trained with EWC on tasks 0--8, and the checkpoint is saved 
 
 ### 2.2 Model Inversion for Past Tasks
 
-Performs model inversion on a pretrained EWC model
+I invert the pretrained EWC model to obtain historical reference images.
 
 | Component | Setting |
 |-----------|---------|
@@ -57,7 +59,7 @@ Performs model inversion on a pretrained EWC model
 | Save frequency | Every 100 epochs |
 | Output directory | `runs/attack_seed0` |
 
-### 2.4 Trains task 9 on clean data
+### 2.4 Train Task 9 on Clean Data
 ```
 CUDA_VISIBLE_DEVICES=0 python -u main_baselines.py \
     --seed 0 \
@@ -76,7 +78,7 @@ CUDA_VISIBLE_DEVICES=0 python -u main_baselines.py \
     2>&1 | tee logs/train_task9_on_clean_data.log
 ```
 
-### 2.5 Trains task 9 on poisoned data
+### 2.5 Train Task 9 on Poisoned Data
 ```
 CUDA_VISIBLE_DEVICES=0 python -u main_baselines.py \
     --seed 0 \
@@ -127,7 +129,7 @@ Features are extracted from Task 9 clean, poisoned and norm-matched random contr
 | Logging frequency | Every 100 images |
 
 ### 2.8 Detector Training and Evaluation
-Trains and evaluates a logistic-regression detector
+The detector is fitted and evaluated on separate splits of Task 9.
 
 | Component | Setting |
 |-----------|---------|

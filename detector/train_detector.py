@@ -96,7 +96,7 @@ def feature_sets(features):
     }
 
 
-def validate_feature_table(features, required_features=None):
+def validate_feature_table(features, required_features=None, classes_per_task=10):
     """Reject incomplete pairs, inconsistent provenance, and invalid values."""
     required = set(METADATA_COLUMNS + (FEATURE_COLUMNS if required_features is None else list(required_features)))
     missing = required - set(features.columns)
@@ -152,8 +152,8 @@ def validate_feature_table(features, required_features=None):
         raise RuntimeError(
             "Feature table must contain clean, poison and random_control."
         )
-    if not features["class_id"].between(0, 9).all():
-        raise RuntimeError("Expected task-local class_id values in 0..9.")
+    if not features["class_id"].between(0, classes_per_task - 1).all():
+        raise RuntimeError("Class IDs are outside the declared task-local range.")
 
     for original_index, group in features.groupby("original_index"):
         if len(group) != 3 or set(group["view"]) != allowed_views:

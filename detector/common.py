@@ -8,6 +8,8 @@ import math
 import pickle
 import random
 import re
+import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -37,9 +39,18 @@ def save_json(data, path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with path.open("w", encoding="utf-8") as file:
-        file.write(encoded)
-        file.write("\n")
+    # Readers monitoring a live run must see either the old or the new JSON,
+    # never a half-written state. The temporary file is on the same filesystem.
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name, dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(encoded + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, str(path))
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def sha256_file(path):
@@ -103,7 +114,7 @@ def normalize_task_order(task_order):
     return normalized
 
 
-def validate_victim_checkpoint(checkpoint):
+def validate_victim_checkpoint(checkpoint, *, transfer_datasets=False):
     if not isinstance(checkpoint, Mapping):
         raise TypeError("Victim checkpoint must be a dictionary-like mapping.")
 
@@ -121,7 +132,9 @@ def validate_victim_checkpoint(checkpoint):
     if missing:
         raise KeyError("Victim checkpoint is missing keys: {}".format(sorted(missing)))
 
-    if checkpoint["dataset"] != "split_cifar100":
+    from detector.image_data import dataset_spec
+    spec = dataset_spec(checkpoint["dataset"])
+    if checkpoint["dataset"] != "split_cifar100" and not transfer_datasets:
         raise ValueError("This first experiment supports only split_cifar100.")
 
     if checkpoint["model_type"] != "resnet":
@@ -132,8 +145,8 @@ def validate_victim_checkpoint(checkpoint):
             "Expected checkpoint['task_num'] == 9. In PROACT this reconstructs ten tasks and leaves task 9 as the incoming task."
         )
 
-    if int(checkpoint["class_num"]) != 10:
-        raise ValueError("Expected ten task-local classes for Split CIFAR-100.")
+    if int(checkpoint["class_num"]) != spec["classes_per_task"]:
+        raise ValueError("Checkpoint has the wrong number of task-local classes.")
 
     if not isinstance(checkpoint["model"], Mapping):
         raise TypeError("checkpoint['model'] must be a PyTorch state_dict mapping.")
@@ -142,7 +155,7 @@ def validate_victim_checkpoint(checkpoint):
         raise ValueError("checkpoint['model'] is empty.")
 
 
-def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckless",)):
+def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckless",), *, transfer_datasets=False):
     if not isinstance(artifact, Mapping):
         raise TypeError("BrainWash artifact must be a dictionary-like mapping.")
 
@@ -160,7 +173,7 @@ def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckl
     if missing:
         raise KeyError("BrainWash artifact is missing keys: {}".format(sorted(missing)))
 
-    validate_victim_checkpoint(artifact["pretrained_ckpt"])
+    validate_victim_checkpoint(artifact["pretrained_ckpt"], transfer_datasets=transfer_datasets)
 
     if artifact["mode"] not in allowed_modes:
         raise ValueError("Unsupported BrainWash mode for this experiment: " + str(artifact["mode"]))
@@ -199,7 +212,9 @@ def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckl
             "rnd_idx_train is not a permutation of 0..{}.".format(expected_size - 1)
         )
 
-    expected_shape = (expected_size, 3, 32, 32)
+    from detector.image_data import dataset_spec
+    size = dataset_spec(artifact["pretrained_ckpt"]["dataset"])["image_size"]
+    expected_shape = (expected_size, 3, size, size)
     if tuple(noise.shape) != expected_shape:
         raise ValueError(
             "Expected latest_noise shape {}, found {}.".format(
@@ -216,9 +231,9 @@ def validate_attack_artifact(artifact, expected_size=5000, allowed_modes=("reckl
         raise ValueError("latest_noise exceeds the declared L-infinity budget.")
 
 
-def compare_checkpoint_identity(victim_checkpoint, artifact_checkpoint):
-    validate_victim_checkpoint(victim_checkpoint)
-    validate_victim_checkpoint(artifact_checkpoint)
+def compare_checkpoint_identity(victim_checkpoint, artifact_checkpoint, *, transfer_datasets=False):
+    validate_victim_checkpoint(victim_checkpoint, transfer_datasets=transfer_datasets)
+    validate_victim_checkpoint(artifact_checkpoint, transfer_datasets=transfer_datasets)
 
     metadata_keys = [
         "dataset",
@@ -378,7 +393,7 @@ def inversion_task_id(path, data):
     return filename_id
 
 
-def matching_inversion_files(folder, expected_count=9):
+def matching_inversion_files(folder, expected_count=9, image_size=32, classes_per_task=10):
     """Return one validated inversion file per task, ordered by actual task id."""
     folder = Path(folder)
 
@@ -402,9 +417,9 @@ def matching_inversion_files(folder, expected_count=9):
                 raise KeyError("{} is missing arrays: {}".format(path, sorted(missing)))
             task_id = inversion_task_id(path, data)
             images, labels = data["x_dst"], data["y_dst"]
-            if images.ndim != 4 or tuple(images.shape[1:]) != (3, 32, 32):
+            if images.ndim != 4 or tuple(images.shape[1:]) != (3, image_size, image_size):
                 raise ValueError(
-                    "Expected N x 3 x 32 x 32 inversion images: {}.".format(path)
+                    "Unexpected inversion image shape: {}.".format(path)
                 )
             if labels.ndim != 1 or not len(labels) or len(images) != len(labels):
                 raise ValueError(
@@ -416,7 +431,7 @@ def matching_inversion_files(folder, expected_count=9):
                 raise ValueError("Non-finite inversion data: {}.".format(path))
             if (
                 not np.equal(labels, labels.astype(np.int64)).all()
-                or not ((labels >= 0) & (labels < 10)).all()
+                or not ((labels >= 0) & (labels < classes_per_task)).all()
             ):
                 raise ValueError(
                     "Inversion labels must be task-local integers 0..9: {}.".format(

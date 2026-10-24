@@ -1,0 +1,32 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xurl}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Background and Related Work}
+\fancyhead[R]{\small Pan Zhang}
+\fancyfoot[C]{\thepage}
+\setlength{\headheight}{15pt}
+\renewcommand{\headrulewidth}{0pt}
+\widowpenalty=10000
+\clubpenalty=10000
+\setlength{\emergencystretch}{1em}
+\renewcommand{\bibfont}{\footnotesize}
+\begin{document}
+\setcounter{section}{1}
+\input{background}
+\clearpage
+\begingroup
+\raggedright
+\interlinepenalty=10000
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+\endgroup
+\end{document}

@@ -360,7 +360,11 @@ def extract_one(
 
     flat = flatten_gradients(gradients)
 
-    gradient_norm = flat.norm()
+    # A long FP32 vector norm can accumulate enough error on CPU to disagree
+    # with the blockwise sums below (observed on the native-resolution ResNet).
+    # Accumulate this diagnostic/global norm in FP64; keep the actual gradients
+    # and the registered per-tensor feature computation unchanged.
+    gradient_norm = flat.double().norm()
 
     cosine = F.cosine_similarity(
         flat,
@@ -434,8 +438,8 @@ def extract_one(
     return features
 
 
-def load_input_npz(path, label_mode):
-    """Load Task-9 images; predicted mode does not access a targets array."""
+def load_input_npz(path, label_mode, image_size=32, classes_per_task=10):
+    """Load images at the declared resolution; predicted mode never reads targets."""
     if label_mode not in {"ground_truth", "predicted"}:
         raise ValueError("Unknown label mode: {}.".format(label_mode))
     with np.load(path, allow_pickle=False) as data:
@@ -444,11 +448,11 @@ def load_input_npz(path, label_mode):
         images = np.asarray(data["images"])
         if (
             images.ndim != 4
-            or tuple(images.shape[1:]) != (3, 32, 32)
+            or tuple(images.shape[1:]) != (3, image_size, image_size)
             or not len(images)
         ):
             raise ValueError(
-                "Incoming images must have nonempty N x 3 x 32 x 32 shape."
+                "Incoming images must have nonempty N x 3 x {0} x {0} shape.".format(image_size)
             )
         if not np.isfinite(images).all() or images.min() < 0 or images.max() > 1:
             raise ValueError("Incoming images must be finite and scaled to [0, 1].")
@@ -465,9 +469,9 @@ def load_input_npz(path, label_mode):
                 )
             if (
                 not np.equal(targets, targets.astype(np.int64)).all()
-                or not ((targets >= 0) & (targets < 10)).all()
+                or not ((targets >= 0) & (targets < classes_per_task)).all()
             ):
-                raise ValueError("Incoming targets must be local integers 0..9.")
+                raise ValueError("Incoming targets are outside the task-local class range.")
             targets = targets.astype(np.int64)
     return torch.from_numpy(images).float(), targets
 

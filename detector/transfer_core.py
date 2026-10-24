@@ -13,6 +13,7 @@ import numpy as np
 import torch
 
 from detector.common import normalize_task_order, validate_victim_checkpoint
+from detector.image_data import dataset_spec, task_order
 
 TRANSFER_PROTOCOL = "source_supervised_task_transfer_v1"
 TASK_ORDER = [list(range(10 * t, 10 * (t + 1))) for t in range(10)]
@@ -35,26 +36,30 @@ def validate_checkpoint(checkpoint, expected_task=None):
         raise ValueError("Checkpoint stage differs from requested incoming task.")
     # Reuse legacy structural checks on a copy, then apply the transfer contract.
     structure = dict(checkpoint, task_num=9)
-    validate_victim_checkpoint(structure)
-    if normalize_task_order(checkpoint["task_order"]) != TASK_ORDER:
-        raise ValueError("Transfer requires the fixed ten-task CIFAR-100 class order.")
+    validate_victim_checkpoint(structure, transfer_datasets=True)
+    if normalize_task_order(checkpoint["task_order"]) != task_order(checkpoint["dataset"]):
+        raise ValueError("Transfer requires the fixed ten-task class order.")
     return task
 
 
-def validate_artifact(artifact, checkpoint, expected_size=5000):
+def validate_artifact(artifact, checkpoint, expected_size=None):
     from detector.common import compare_checkpoint_identity, validate_attack_artifact
 
     task = validate_checkpoint(checkpoint)
+    spec = dataset_spec(checkpoint["dataset"])
+    if expected_size is None:
+        expected_size = spec["classes_per_task"] * spec["train_per_class"]
     validate_checkpoint(artifact["pretrained_ckpt"], task)
     if artifact.get("attacked_task") != task:
         raise ValueError("Attack targets a different incoming task.")
     # Existing noise/permutation and tensor identity checks are stage-independent.
     left = dict(checkpoint, task_num=9)
     right = dict(artifact["pretrained_ckpt"], task_num=9)
-    compare_checkpoint_identity(left, right)
+    compare_checkpoint_identity(left, right, transfer_datasets=True)
     validate_attack_artifact(
         dict(artifact, pretrained_ckpt=right, attacked_task=9), expected_size,
         allowed_modes=("reckless", "cautious"),
+        transfer_datasets=True,
     )
     if artifact.get("real", False):
         raise ValueError("This registered protocol uses inversion-based BrainWash.")
@@ -65,6 +70,11 @@ def fixed_dataset_specs(**checkpoint):
     from data_utils import generate_split_cifar100_tasks
 
     task = validate_checkpoint(checkpoint)
+    if checkpoint["dataset"] != "split_cifar100":
+        from detector.image_data import PreparedData
+        if "data_registration" not in checkpoint:
+            raise ValueError("ImageNet extraction requires registered prepared data.")
+        return PreparedData(checkpoint["data_registration"]).specs(**checkpoint)
     data, order = generate_split_cifar100_tasks(
         task_num=10, seed=checkpoint["seed"], rnd_order=False, order=np.arange(100)
     )
@@ -86,7 +96,8 @@ def load_defender(checkpoint, device, head_seed):
     from resnet import ResNet18
 
     task = validate_checkpoint(checkpoint)
-    model = ResNet18(task + 1, 10, nf=32).to(device)
+    width = dataset_spec(checkpoint["dataset"])["classes_per_task"]
+    model = ResNet18(task + 1, width, nf=32).to(device)
     expected = model.state_dict()
     saved = checkpoint["model"]
     filtered = {}
@@ -97,8 +108,8 @@ def load_defender(checkpoint, device, head_seed):
     # a full ten-head schema before ignoring them (RWALK scores can be signed).
     shapes = {name: param.shape for name, param in model.named_parameters()}
     for index in range(task + 1, 10):
-        shapes["heads.{}.weight".format(index)] = (10, model.emb_dim)
-        shapes["heads.{}.bias".format(index)] = (10,)
+        shapes["heads.{}.weight".format(index)] = (width, model.emb_dim)
+        shapes["heads.{}.bias".format(index)] = (width,)
     bookkeeping = {}
     for name, shape in shapes.items():
         key = name.replace(".", "_")
@@ -120,13 +131,13 @@ def load_defender(checkpoint, device, head_seed):
             continue
         future = re.fullmatch(r"heads\.(\d+)\.(weight|bias)", key)
         if future and task < int(future.group(1)) < 10:
-            shape = (10, model.emb_dim) if future.group(2) == "weight" else (10,)
+            shape = (width, model.emb_dim) if future.group(2) == "weight" else (width,)
             if tuple(value.shape) != shape:
                 raise ValueError("Unexpected unused future head: " + key)
             continue
         future_fisher = re.fullmatch(r"heads_(\d+)_(weight|bias)_fisher", key)
         if future_fisher and task < int(future_fisher.group(1)) < 10:
-            shape = (10, model.emb_dim) if future_fisher.group(2) == "weight" else (10,)
+            shape = (width, model.emb_dim) if future_fisher.group(2) == "weight" else (width,)
             if tuple(value.shape) != shape or (value < 0).any():
                 raise ValueError("Invalid unused future-head Fisher buffer: " + key)
             continue
@@ -163,9 +174,13 @@ def contract(metadata):
     if metadata["transfer_protocol"] != TRANSFER_PROTOCOL:
         raise ValueError("Unsupported transfer protocol.")
     task = task_index(metadata["task_index"])
+    order = task_order(metadata.get("dataset", "split_cifar100"))
+    if metadata.get("dataset", "split_cifar100") != "split_cifar100":
+        if not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get("dataset_sha256", ""))):
+            raise ValueError("Missing prepared-dataset identity.")
     if (
-        metadata["task_order"] != TASK_ORDER
-        or metadata["class_ids"] != TASK_ORDER[task]
+        metadata["task_order"] != order
+        or metadata["class_ids"] != order[task]
     ):
         raise ValueError("Incorrect task/class identity.")
     if (
@@ -180,6 +195,9 @@ def contract(metadata):
 
 def assert_transfer(source, target, columns):
     source, target = contract(source), contract(target)
+    for key in ("dataset", "dataset_sha256"):
+        if source.get(key) != target.get(key):
+            raise ValueError("Source/target dataset identity differs: " + key)
     if target["task_index"] <= source["task_index"]:
         raise ValueError("Target must be a later task than the source.")
     if set(source["class_ids"]) & set(target["class_ids"]):
