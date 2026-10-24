@@ -1,0 +1,558 @@
+{
+  "cells": [
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.61549778055556,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 7.441345656944445,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019324366666666665,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05309695361111111,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3481998272222222,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.19708930666666666,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 8.844480465,
+          "stages": 3
+        }
+      },
+      "method": "afec_ewc",
+      "missing_timing": [],
+      "seed": "seed6",
+      "total_stage_wall_hours": 69.51903435666667
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.05581207944444,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 7.639406386111111,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019383900277777776,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05429571944444444,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.33691404861111107,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.20294428472222223,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 9.903803955555555,
+          "stages": 3
+        }
+      },
+      "method": "afec_ewc",
+      "missing_timing": [],
+      "seed": "seed7",
+      "total_stage_wall_hours": 70.21256037416667
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.05446414055556,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 7.451540549444444,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019043045555555554,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05455125833333333,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3559007916666667,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.1984010102777778,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 9.698732043055555,
+          "stages": 3
+        }
+      },
+      "method": "afec_ewc",
+      "missing_timing": [],
+      "seed": "seed8",
+      "total_stage_wall_hours": 69.8326328388889
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.04056723611111,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.9163083966666665,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019128260833333334,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.054129594722222216,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3417041202777778,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.1929723375,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 7.7252559694444445,
+          "stages": 3
+        }
+      },
+      "method": "ancl_ewc",
+      "missing_timing": [],
+      "seed": "seed6",
+      "total_stage_wall_hours": 65.29006591555556
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.20906267583333,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.993750835277778,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019181118888888887,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.053299779722222225,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.33505669,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.20008132666666667,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 7.943439976111111,
+          "stages": 3
+        }
+      },
+      "method": "ancl_ewc",
+      "missing_timing": [],
+      "seed": "seed7",
+      "total_stage_wall_hours": 65.7538724025
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 51.9534763575,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.947975738333334,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019864757222222224,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05547606388888889,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.335998425,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.19564368944444444,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 7.493022172777778,
+          "stages": 3
+        }
+      },
+      "method": "ancl_ewc",
+      "missing_timing": [],
+      "seed": "seed8",
+      "total_stage_wall_hours": 65.00145720416667
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.033874014999995,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.178548318055556,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.01985049222222222,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.054526165,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.35660543611111106,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.1966794238888889,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 4.747487464444444,
+          "stages": 3
+        }
+      },
+      "method": "ewc",
+      "missing_timing": [],
+      "seed": "seed6",
+      "total_stage_wall_hours": 60.58757131472222
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.23760775694444,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.183724017222222,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.02012014388888889,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.0545096675,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.33143052916666665,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.19681291944444446,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 6.012975242777778,
+          "stages": 3
+        }
+      },
+      "method": "ewc",
+      "missing_timing": [],
+      "seed": "seed7",
+      "total_stage_wall_hours": 62.03718027694444
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.17306550027777,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.2982760597222223,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.021043949444444446,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.054062344444444445,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.33432030500000004,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.20260252027777775,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 5.873685332777778,
+          "stages": 3
+        }
+      },
+      "method": "ewc",
+      "missing_timing": [],
+      "seed": "seed8",
+      "total_stage_wall_hours": 61.95705601194444
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.19582031777778,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.273727853888889,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.01902297222222222,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05405424194444444,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.35488218916666664,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.1928798861111111,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 4.7702505975,
+          "stages": 3
+        }
+      },
+      "method": "mas",
+      "missing_timing": [],
+      "seed": "seed6",
+      "total_stage_wall_hours": 60.860638058611116
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.039783694166665,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.2373884155555555,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019747150555555554,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.053400727499999995,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3517123419444444,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.20028985777777777,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 6.469695485833333,
+          "stages": 3
+        }
+      },
+      "method": "mas",
+      "missing_timing": [],
+      "seed": "seed7",
+      "total_stage_wall_hours": 62.37201767333333
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.26023570888889,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 3.254127875277778,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.018864803888888892,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.053960821944444445,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.35230533722222224,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.19877664083333332,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 6.919410823055555,
+          "stages": 3
+        }
+      },
+      "method": "mas",
+      "missing_timing": [],
+      "seed": "seed8",
+      "total_stage_wall_hours": 63.05768201111111
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 51.86459644472222,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.267655431111112,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.019222606944444446,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05380273055555555,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3454467761111111,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.1937931125,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 5.6009351125,
+          "stages": 3
+        }
+      },
+      "method": "rwalk",
+      "missing_timing": [],
+      "seed": "seed6",
+      "total_stage_wall_hours": 62.34545221444444
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.05390953083334,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.274938791666667,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.020136361944444445,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.053430076666666666,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3518630419444444,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.20195372111111112,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 7.399460811666667,
+          "stages": 3
+        }
+      },
+      "method": "rwalk",
+      "missing_timing": [],
+      "seed": "seed7",
+      "total_stage_wall_hours": 64.35569233583334
+    },
+    {
+      "categories": {
+        "attack": {
+          "hours": 52.193814205833334,
+          "stages": 6
+        },
+        "continuation_training": {
+          "hours": 4.215979879444444,
+          "stages": 12
+        },
+        "detector_fitting": {
+          "hours": 0.01929268138888889,
+          "stages": 2
+        },
+        "evaluate": {
+          "hours": 0.05301439,
+          "stages": 4
+        },
+        "extract": {
+          "hours": 0.3460041375,
+          "stages": 6
+        },
+        "inversion": {
+          "hours": 0.19437650416666666,
+          "stages": 3
+        },
+        "victim": {
+          "hours": 7.457641169166666,
+          "stages": 3
+        }
+      },
+      "method": "rwalk",
+      "missing_timing": [],
+      "seed": "seed8",
+      "total_stage_wall_hours": 64.4801229675
+    }
+  ],
+  "input_run": "/Users/zhangpan/Downloads/proact-result/advisor_final_v1",
+  "interpretation": "Sum of recorded subprocess wall durations, not measured GPU kernel time. Parallel cells overlap.",
+  "repeated_work": [
+    "Legacy target clean continuation runs four times per cell; the new plan runs it once.",
+    "Legacy uniform continuation runs twice per budget; the new plan runs it once per budget.",
+    "Legacy clean/random feature measurements repeat across attacks; the new plan reuses matching frozen-model controls.",
+    "ImageNet attack evaluation now loads and partitions prepared arrays once per subprocess, with fresh dataset wrappers and unchanged RNG resets."
+  ],
+  "retained_work": [
+    "Six distinct BrainWash artifacts remain: Task 1 and Task 4 reckless/0.3, plus four Task 9 attacks.",
+    "Different stage checkpoints require their own inversions and feature references.",
+    "Attack epochs (5000), victim epochs (100), full images and inversion iterations (2000) are unchanged.",
+    "Pseudo-gradient model creation remains in the unmodified upstream attack loop; no unvalidated functional rewrite is enabled."
+  ]
+}
