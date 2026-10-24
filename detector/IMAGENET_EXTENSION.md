@@ -79,6 +79,16 @@ The unlabelled test set is not substituted for the labelled validation set.
 The original images are not moved. The NPZ and provenance sidecar record the
 conversion and class mapping.
 
+Validation images may be flat under `val/images/` or organized into class
+subdirectories, including PROACT's `val/images/<class>/` layout. The converter
+matches filenames against `val_annotations.txt` recursively and checks that
+any class folder agrees with the annotation. Duplicate filenames, missing
+images and unannotated files are rejected. Known OS sidecars such as
+`.DS_Store` are excluded without dropping images; detected layouts are saved
+in the preparation record. An earlier flat-only check could reject a complete
+class-organized archive before conversion. Updating this preparation helper
+does not require downloading the cached archives again.
+
 The extractor rejects absolute/traversing paths, symlinks, duplicate members
 and oversized archives. Failed conversions use isolated temporary directories
 and do not promote incomplete data. Existing untracked outputs are never

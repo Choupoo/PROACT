@@ -82,7 +82,7 @@ class PreparationTests(unittest.TestCase):
             prep.prepare_mini(self.root, self.root / "product")
         self.assertFalse((self.root / "product").exists())
 
-    def tiny_zip(self, missing=False):
+    def tiny_zip(self, missing=False, layout="flat", sidecars=False, duplicate=False, wrong_class=False):
         archive = self.root / "tiny.zip"
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr("tiny/wnids.txt", "nB\nnA\n")
@@ -96,8 +96,16 @@ class PreparationTests(unittest.TestCase):
                 filename = name + "_val.PNG"
                 annotations.append(filename + "\t" + name + "\t0\t0\t4\t4")
                 if not (missing and name == "nB"):
-                    bundle.writestr("tiny/val/images/" + filename, buffer.getvalue())
+                    folder_class = "nA" if wrong_class and name == "nB" else name
+                    directories = {"flat": "images", "images/class": "images/" + folder_class,
+                                   "class": folder_class, "class/images": folder_class + "/images"}
+                    bundle.writestr("tiny/val/" + directories[layout] + "/" + filename, buffer.getvalue())
+                    if duplicate:
+                        bundle.writestr("tiny/val/images/" + name + "/" + filename, buffer.getvalue())
             bundle.writestr("tiny/val/val_annotations.txt", "\n".join(annotations))
+            if sidecars:
+                for path in ("val/images/.DS_Store", "val/images/._nA_val.PNG", "train/nA/images/.DS_Store"):
+                    bundle.writestr("tiny/" + path, b"OS metadata, not image data")
         return archive
 
     def test_tiny_full_train_and_labelled_validation_rgb(self):
@@ -123,6 +131,47 @@ class PreparationTests(unittest.TestCase):
         output.mkdir()
         with self.use_spec(self.spec("split_tiny_imagenet")):
             with self.assertRaisesRegex(ValueError, "annotations differ"):
+                prep.prepare_one("tiny", archive, output, {})
+        self.assertEqual(list(output.iterdir()), [])
+
+    def test_all_validation_layouts_preserve_identical_arrays(self):
+        expected = None
+        for i, layout in enumerate(("flat", "images/class", "class", "class/images")):
+            archive = self.tiny_zip(layout=layout, sidecars=True)
+            output = self.root / ("prepared" + str(i))
+            output.mkdir()
+            with self.use_spec(self.spec("split_tiny_imagenet")):
+                target = prep.prepare_one("tiny", archive, output, {})
+            with np.load(target, allow_pickle=False) as data:
+                arrays = {k: data[k] for k in data.files}
+            if expected is None:
+                expected = arrays
+            else:
+                for key in arrays:
+                    np.testing.assert_array_equal(arrays[key], expected[key])
+            metadata = json.loads((output / "tiny_preparation.json").read_text())
+            self.assertEqual(metadata["conversion"]["validation_layout"]["layouts"], [layout])
+            self.assertEqual(metadata["conversion"]["validation_layout"]["ignored_os_sidecars"], 2)
+
+    def test_duplicate_and_mislabelled_validation_files_rejected(self):
+        for options, message in ((dict(duplicate=True), "Duplicate validation"),
+                                 (dict(layout="images/class", wrong_class=True), "disagrees with annotation")):
+            archive = self.tiny_zip(**options)
+            output = self.root / message.split()[0]
+            output.mkdir()
+            with self.use_spec(self.spec("split_tiny_imagenet")):
+                with self.assertRaisesRegex(ValueError, message):
+                    prep.prepare_one("tiny", archive, output, {})
+            self.assertEqual(list(output.iterdir()), [])
+
+    def test_unannotated_image_is_not_silently_dropped(self):
+        archive = self.tiny_zip()
+        with zipfile.ZipFile(archive, "a") as bundle:
+            bundle.writestr("tiny/val/images/unlabelled.JPEG", b"not a supported sidecar")
+        output = self.root / "prepared"
+        output.mkdir()
+        with self.use_spec(self.spec("split_tiny_imagenet")):
+            with self.assertRaisesRegex(ValueError, "1 unexpected files"):
                 prep.prepare_one("tiny", archive, output, {})
         self.assertEqual(list(output.iterdir()), [])
 

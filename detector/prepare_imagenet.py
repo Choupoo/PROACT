@@ -201,6 +201,54 @@ def prepare_mini(extracted, output):
     return dict(format="authors_prepared_npy", split="preserved_byte_for_byte", original_hashes=record["hashes"])
 
 
+def archive_metadata(path, root):
+    """Ignore only known OS sidecars, never unlabelled or unreadable images."""
+    return any(part in (".DS_Store", "Thumbs.db", "__MACOSX") or part.startswith("._")
+               for part in path.relative_to(root).parts)
+
+
+def tiny_validation_index(root, annotations, classes):
+    """Resolve original flat and class-organized validation files by annotation.
+
+    PROACT's existing preprocessing moves images into val/images/<class>/.
+    Read these files in place; do not infer/replace labels from folder names.
+    """
+    validation = root / "val"
+    files, unexpected = {}, []
+    ignored = 0
+    layouts = set()
+    for path in sorted(validation.rglob("*")):
+        if not path.is_file() or path == validation / "val_annotations.txt":
+            continue
+        if archive_metadata(path, validation):
+            ignored += 1
+            continue
+        name = path.name
+        relative = path.relative_to(validation)
+        if name not in annotations:
+            unexpected.append(str(relative))
+            continue
+        if name in files:
+            raise ValueError("Duplicate validation image filename: {} ({}, {}).".format(name, files[name], path))
+        label = annotations[name]
+        parents = relative.parts[:-1]
+        allowed = {("images",): "flat", ("images", label): "images/class",
+                   (label,): "class", (label, "images"): "class/images"}
+        if parents not in allowed:
+            if any(part in classes and part != label for part in parents):
+                raise ValueError("Validation folder disagrees with annotation: {} must be {}.".format(relative, label))
+            raise ValueError("Unsupported validation image layout: " + str(relative))
+        layouts.add(allowed[parents])
+        files[name] = path
+    missing = sorted(set(annotations) - set(files))
+    if missing or unexpected:
+        raise ValueError("Validation images and annotations differ: {} annotations, {} matched images; "
+                         "{} missing (examples: {}); {} unexpected files (examples: {}).".format(
+                             len(annotations), len(files), len(missing), missing[:5],
+                             len(unexpected), unexpected[:5]))
+    return files, dict(layouts=sorted(layouts), ignored_os_sidecars=ignored)
+
+
 def prepare_tiny(extracted, output, scratch):
     from PIL import Image
     spec = dataset_spec("split_tiny_imagenet")
@@ -212,18 +260,23 @@ def prepare_tiny(extracted, output, scratch):
     classes = sorted((root / "wnids.txt").read_text().split())
     if len(classes) != spec["classes"] or len(set(classes)) != len(classes):
         raise ValueError("tinyImageNet has incomplete or duplicate class identifiers.")
-    if sorted(p.name for p in (root / "train").iterdir() if p.is_dir()) != classes:
+    if sorted(p.name for p in (root / "train").iterdir()
+              if p.is_dir() and not archive_metadata(p, root)) != classes:
         raise ValueError("Training class folders differ from wnids.txt.")
     mapping = {name: i for i, name in enumerate(classes)}
     annotations = {}
     for line in (root / "val/val_annotations.txt").read_text().splitlines():
         fields = line.split()
-        if len(fields) < 2 or fields[0] in annotations or fields[1] not in mapping:
+        if (len(fields) < 2 or fields[0] in annotations or fields[1] not in mapping or
+                Path(fields[0]).name != fields[0] or "\\" in fields[0]):
             raise ValueError("Invalid or duplicate validation annotation.")
         annotations[fields[0]] = fields[1]
-    validation_files = {p.name for p in (root / "val/images").iterdir() if p.is_file()}
-    if validation_files != set(annotations):
-        raise ValueError("Validation images and annotations differ.")
+    validation_files, validation_layout = tiny_validation_index(root, annotations, mapping)
+    for name in classes:
+        if sum(label == name for label in annotations.values()) != spec["test_per_class"]:
+            raise ValueError("Validation annotations have the wrong image count for " + name)
+    print("tinyImageNet validation: {} annotated images; layout {}".format(
+        len(validation_files), ", ".join(validation_layout["layouts"])), flush=True)
     arrays, index = {}, hashlib.sha256()
     for split, xkey, ykey, per_class in (("train", "train_data", "train_lbls", spec["train_per_class"]),
                                         ("val", "tst_data", "tst_lbls", spec["test_per_class"])):
@@ -234,8 +287,9 @@ def prepare_tiny(extracted, output, scratch):
         labels = np.empty(n, dtype=np.int64)
         offset = 0
         for name in classes:
-            files = (sorted((root / "train" / name / "images").iterdir()) if split == "train" else
-                     [root / "val/images" / f for f in sorted(annotations) if annotations[f] == name])
+            files = (sorted(p for p in (root / "train" / name / "images").iterdir()
+                            if not archive_metadata(p, root)) if split == "train" else
+                     [validation_files[f] for f in sorted(annotations) if annotations[f] == name])
             if len(files) != per_class or not all(p.is_file() for p in files):
                 raise ValueError("{} {} does not contain {} images.".format(split, name, per_class))
             for path in files:
@@ -256,6 +310,7 @@ def prepare_tiny(extracted, output, scratch):
     # 5.4 GB into a second conversion-time ndarray.
     np.savez(output, **arrays)
     return dict(format="standard_tiny_imagenet", class_order=classes, image_index_sha256=index.hexdigest(),
+                validation_layout=validation_layout,
                 split="all official train images / all labelled validation images", resizing=False,
                 row_order="sorted class ID, then sorted original filename", rgb="Pillow RGB / 255, float32 NCHW")
 
