@@ -1,7 +1,7 @@
 """Registered full-data EWC extension: one independent worker per dataset.
 
-Tasks 1/4/9, four target attacks, historical MAD rule and nine retrained feature
-ablations. The default is one seed per dataset, not a reduced image subset.
+Tasks 1/4 for development and the final task for evaluation (9 for mini, 19
+for tiny), four target attacks and nine retrained feature ablations. Two seeds.
 """
 
 import argparse
@@ -14,20 +14,22 @@ from pathlib import Path
 from detector import advisor_final, advisor_study as study
 from detector.common import save_json, sha256_file
 from detector.doctor import diagnose
-from detector.image_data import register, verify
+from detector.image_data import dataset_spec, register, verify
 from detector.io_utils import DETECTOR_ROOT, ensure_output_path
 from detector.transfer_core import fingerprint
 
 DATASETS = {"mini": "split_mini_imagenet", "tiny": "split_tiny_imagenet"}
-DEFAULT_OUTPUT = DETECTOR_ROOT / "work/advisor_imagenet_v1"
+DEFAULT_OUTPUT = DETECTOR_ROOT / "work/advisor_imagenet_2seeds_v3"
 
 
 def plan_settings(root, dataset, seeds, record):
-    return dict(methods=["ewc"], seeds=list(seeds), source_task=1, history_tasks=[4], target_task=9,
+    spec = dataset_spec(dataset)
+    return dict(methods=["ewc"], seeds=list(seeds), source_task=1, history_tasks=[4], target_task=spec["tasks"] - 1,
+                task_count=spec["tasks"],
                 victim_epochs=100, inversion_iters=2000, attack_epochs=5000, delta=.3,
                 cautious_weight=1., method_parameters={"ewc": list(study.METHODS["ewc"])},
                 task_size=150, bags_per_rate=100, alpha=.05, label_mode="predicted",
-                protocol="advisor_full_imagenet_v1", attacks=[list(a) for a in study.ATTACKS],
+                protocol="advisor_full_imagenet_v3", attacks=[list(a) for a in study.ATTACKS],
                 threshold_rule="history_mad", ablations=True, unsupervised=False, effectiveness=True,
                 scope="full_data_ewc_extension", dataset=dataset,
                 dataset_sha256=record["dataset_sha256"], full_training_data=True,
@@ -121,9 +123,10 @@ def summarize_one(root):
     header = ("# Full-data EWC extension: {}\n\n"
               "All training images are retained. Each dataset has its own source-trained detector and historical calibration; "
               "this is not training on CIFAR-100 and transferring the detector across datasets.\n\n"
-              "The numerical cutoffs are fitted on Tasks 1/4 of this dataset and frozen before Task 9. "
+              "The numerical cutoffs are fitted on Tasks 1/4 of this dataset and frozen before Task {} (zero-based). "
               "The historical MAD heuristic and feature definitions are unchanged. Rank/MMD are not rerun here. "
-              "One seed does not quantify seed-to-seed variability.\n\n").format(payload["settings"]["dataset"])
+              "Results cover {} registered seeds; these are not independent datasets.\n\n").format(
+                  payload["settings"]["dataset"], payload["settings"]["target_task"], len(payload["settings"]["seeds"]))
     path.write_text(header + report, encoding="utf-8")
     return profile
 
@@ -160,9 +163,9 @@ def main():
         p = subs.add_parser(action)
         p.add_argument("--output-dir", default=str(DEFAULT_OUTPUT))
         if action == "plan":
-            p.add_argument("--mini-data", required=True, help="Directory containing train_x/y.npy and test_x/y.npy.")
-            p.add_argument("--tiny-data", required=True, help="PROACT-format tiny_imagenet.npz.")
-            p.add_argument("--seeds", type=int, nargs="+", default=[6])
+            p.add_argument("--mini-data", default=str(DETECTOR_ROOT / "data_prepared/miniImagenet"), help="Directory containing train_x/y.npy and test_x/y.npy.")
+            p.add_argument("--tiny-data", default=str(DETECTOR_ROOT / "data_prepared/tiny_imagenet.npz"), help="PROACT-format tiny_imagenet.npz.")
+            p.add_argument("--seeds", type=int, nargs="+", default=[6, 7])
         elif action == "run":
             p.add_argument("--dataset", choices=list(DATASETS), required=True)
             p.add_argument("--seed", type=int)

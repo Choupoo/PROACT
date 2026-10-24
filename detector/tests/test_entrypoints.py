@@ -57,9 +57,9 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(before, sha256_file(frozen))
         self.assertTrue((output / "feature_importance.png").is_file())
 
-    def test_tiny_twenty_class_explanation_uses_new_validator(self):
+    def test_tiny_ten_class_explanation_uses_new_validator(self):
         table, meta = self.source("split_tiny_imagenet")
-        table.loc[table.original_index == table.original_index.min(), "class_id"] = 19
+        table.loc[table.original_index == table.original_index.min(), "class_id"] = 9
         bundle = base.fit_source(table, meta, feature_set="inference_full", task_size=16)
         report = explain.explain(table, meta, bundle, self.root)
         self.assertLess(report["max_additivity_error"], 1e-10)
@@ -78,7 +78,7 @@ class EntryPointTests(unittest.TestCase):
         bundle = base.fit_source(table, meta, feature_set="inference_context", task_size=16)
         bundle["calibration_history"] = [dict(task=1), dict(task=4)]
         spec = dataset_spec(dataset)
-        checkpoint = dict(checkpoint_fixture(), dataset=dataset, task_num=9,
+        checkpoint = dict(checkpoint_fixture(), dataset=dataset, task_num=spec["tasks"] - 1,
                           task_order=task_order(dataset), class_num=spec["classes_per_task"],
                           seed=meta["checkpoint_seed"], cont_method_args={"method": "ewc"})
         return bundle, checkpoint
@@ -120,7 +120,7 @@ class EntryPointTests(unittest.TestCase):
                 refs = case / "inversions"
                 refs.mkdir()
                 rng = np.random.RandomState(33)
-                for task in range(9):
+                for task in range(checkpoint["task_num"]):
                     np.savez(refs / ("inversions_tid_{:02d}.npz".format(task)),
                              x_dst=rng.rand(2, 3, size, size).astype(np.float32), y_dst=np.array([0, 1]))
                 images = rng.rand(16, 3, size, size).astype(np.float32)
@@ -128,7 +128,12 @@ class EntryPointTests(unittest.TestCase):
                 np.savez(source, images=images)  # No labels, splits or clean/poison views.
                 args = argparse.Namespace(bundle=str(frozen), checkpoint=str(checkpoint_path),
                     inversion_dir=str(refs), input_npz=str(source), output_dir=str(case / "prediction"), device="cpu")
-                with mock.patch.object(incoming, "load_defender", side_effect=lambda *a: make_model()):
+                def synthetic_defender(*unused):
+                    model = make_model()
+                    model.heads = torch.nn.ModuleList([copy.deepcopy(model.heads[0])
+                                                       for _ in range(checkpoint["task_num"] + 1)])
+                    return model.eval()
+                with mock.patch.object(incoming, "load_defender", side_effect=synthetic_defender):
                     predict.main(args)
                     np.savez(source, images=images, targets=np.array([object()], dtype=object))
                     again = copy.copy(args)

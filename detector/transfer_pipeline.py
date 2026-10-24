@@ -55,6 +55,9 @@ def artifact_steps(root, task, seed, settings):
         if settings.get("dataset"):
             if "--experiment" in argv:
                 argv[argv.index("--experiment") + 1] = settings["dataset"]
+            if "--tasknum" in argv:
+                from detector.image_data import dataset_spec
+                argv[argv.index("--tasknum") + 1] = str(dataset_spec(settings["dataset"])["tasks"])
         steps.append(
             {
                 "name": name,

@@ -401,9 +401,9 @@ def summarize(args):
     save_json(summary, output / "summary.json")
     lines = ["# Predicted-gradient detector update", "", "Status: **{}**.".format(summary["status"]), "",
              "The detector uses predicted classes, not image-class labels. Tensor norms are retained.",
-             ("The threshold rule is prespecified as {}; its numeric sample/count cutoffs are calibrated using Tasks 1 and 4 and frozen before Task 9."
-              .format(settings["threshold_rule"]) if settings.get("threshold_rule") else
-              "Threshold rules are selected on development tasks and frozen before Task 9."),
+             ("The threshold rule is prespecified as {}; its numeric sample/count cutoffs are calibrated using Tasks {} and frozen before Task {} (zero-based)."
+              .format(settings["threshold_rule"], ", ".join(map(str, [settings["source_task"]] + settings["history_tasks"])), settings["target_task"]) if settings.get("threshold_rule") else
+              "Threshold rules are selected on development tasks and frozen before Task {}.".format(settings["target_task"])),
              "Random alerts are noise sensitivity, not clean FPR.", "",
              "| CL method | Seed | Attack | Budget | AUC | Sample clean FPR | Poison TPR | Dataset clean FPR |",
              "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |"]
@@ -479,7 +479,7 @@ def summarize(args):
     lines.append("{} completed cells did not meet the development clean-error criterion with their reported rule.".format(failed))
     for row in rows:
         if row["family"] == "ablations" and row["variant"] == "inference_full" and max(row["clean_fpr"], row["clean_dataset_fpr"]) > settings["alpha"]:
-            lines.append("- {} seed {} {} {}: the frozen rule exceeded the nominal clean-error target on Task 9.".format(row["method"], row["seed"], row["attack"], row["delta"]))
+            lines.append("- {} seed {} {} {}: the frozen rule exceeded the nominal clean-error target on Task {}.".format(row["method"], row["seed"], row["attack"], row["delta"], settings["target_task"]))
     lines += ["", "The JSON contains the results enabled in this plan, including failed settings. Empty unsupervised or attack_effectiveness lists mean those experiments were not run. Do not select a new winner from target results.", ""] + summary["limitations"]
     (output / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("Saved:", output)

@@ -44,8 +44,9 @@ class ImageDataTests(unittest.TestCase):
         mini = image_data.dataset_spec("split_mini_imagenet")
         tiny = image_data.dataset_spec("split_tiny_imagenet")
         self.assertEqual((mini["classes"], mini["train_per_class"], mini["image_size"]), (100, 500, 84))
-        self.assertEqual((tiny["classes"], tiny["classes_per_task"], tiny["image_size"]), (200, 20, 64))
-        self.assertEqual(image_data.task_order("split_tiny_imagenet")[9], list(range(180, 200)))
+        self.assertEqual((tiny["classes"], tiny["classes_per_task"], tiny["image_size"]), (200, 10, 64))
+        self.assertEqual(len(image_data.task_order("split_tiny_imagenet")), 20)
+        self.assertEqual(image_data.task_order("split_tiny_imagenet")[19], list(range(190, 200)))
         with self.assertRaises(ValueError):
             image_data.dataset_spec("unknown")
 
@@ -101,7 +102,7 @@ class ImageDataTests(unittest.TestCase):
     def test_cached_tiny_specs_have_fresh_wrappers_and_repeat_rng(self):
         spec, arrays = small_arrays("split_tiny_imagenet")
         checkpoint = dict(checkpoint_fixture(), dataset="split_tiny_imagenet", task_num=4,
-                          class_num=20, task_order=image_data.task_order("split_tiny_imagenet"), seed=7)
+                          class_num=10, task_order=image_data.task_order("split_tiny_imagenet"), seed=7)
         with mock.patch.object(image_data, "verify"), mock.patch.object(image_data, "dataset_spec", return_value=spec), \
              mock.patch.object(image_data, "read_arrays", return_value=arrays) as loader:
             prepared = image_data.PreparedData(dict(dataset="split_tiny_imagenet", spec=spec, files={}))
@@ -114,26 +115,42 @@ class ImageDataTests(unittest.TestCase):
             self.assertTrue(torch.equal(second[0]["train"][4].data, original))
             torch.testing.assert_close(torch.rand(3), expected, rtol=0, atol=0)
             self.assertEqual(len(second[0]["train"]), 5)
-            self.assertEqual(second[3], 20)
+            self.assertEqual(second[3], 10)
             self.assertEqual(loader.call_count, 1)
 
-    def test_tiny_defender_has_twenty_class_heads(self):
+    def test_tiny_defender_has_twenty_ten_class_heads(self):
         from resnet import ResNet18
-        model = ResNet18(10, 20)
-        checkpoint = dict(checkpoint_fixture(), dataset="split_tiny_imagenet", class_num=20,
+        model = ResNet18(20, 10)
+        checkpoint = dict(checkpoint_fixture(), dataset="split_tiny_imagenet", class_num=10,
                           task_order=image_data.task_order("split_tiny_imagenet"), task_num=1,
                           model=model.state_dict())
         loaded = transfer_core.load_defender(checkpoint, torch.device("cpu"), 11)
-        self.assertEqual(loaded.heads[-1].out_features, 20)
+        self.assertEqual(loaded.heads[-1].out_features, 10)
         self.assertTrue(torch.equal(loaded.conv1.weight, model.conv1.weight))
         with self.assertRaises(ValueError):
-            transfer_core.validate_checkpoint(dict(checkpoint, class_num=10))
+            transfer_core.validate_checkpoint(dict(checkpoint, class_num=20))
+        final = dict(checkpoint, task_num=19)
+        self.assertEqual(transfer_core.validate_checkpoint(final), 19)
+        self.assertEqual(len(transfer_core.load_defender(final, torch.device("cpu"), 11).heads), 20)
+
+    def test_tiny_training_retains_all_twenty_tasks(self):
+        spec, arrays = small_arrays("split_tiny_imagenet")
+        with mock.patch.object(image_data, "verify"), mock.patch.object(image_data, "dataset_spec", return_value=spec), \
+             mock.patch.object(image_data, "read_arrays", return_value=arrays):
+            prepared = image_data.PreparedData(dict(dataset="split_tiny_imagenet", spec=spec, files={}))
+            data, taskcla, size, order = prepared.training(19, False, task_num=20, rnd_order=False, order=np.arange(200))
+            self.assertEqual(len(taskcla), 20)
+            self.assertEqual(len(order), 20)
+            self.assertEqual(len(data[19]["train"]["x"]), 20)
+            self.assertEqual(set(data[19]["train"]["y"].tolist()), set(range(10)))
+            with self.assertRaises(ValueError):
+                prepared.training(9, False, task_num=10, rnd_order=False, order=np.arange(200))
 
     def test_backbone_features_work_at_both_native_resolutions(self):
         from resnet import ResNet18
         from detector.extract_features import backbone_parameters, extract_one
         from detector.common import assert_model_unchanged, snapshot_state_dict
-        for width, size in ((10, 84), (20, 64)):
+        for width, size in ((10, 84), (10, 64)):
             model = ResNet18(2, width).eval()
             named, parameters = backbone_parameters(model)
             before = snapshot_state_dict(model)
@@ -214,8 +231,10 @@ class ImageWorkflowTests(unittest.TestCase):
 
     def test_tiny_fit_calibrate_and_target_evaluate(self):
         paths = []
-        for task in (1, 4, 9):
-            table, meta = predicted(task)
+        for task in (1, 4, 19):
+            table, meta = predicted(min(task, 9))
+            table["task_index"] = task
+            meta["task_index"] = task
             table = table.drop(columns="true_class_probability")
             meta["feature_columns"].remove("true_class_probability")
             meta.update(dataset="split_tiny_imagenet", dataset_sha256="a" * 64,
@@ -223,7 +242,7 @@ class ImageWorkflowTests(unittest.TestCase):
                         task_order=image_data.task_order("split_tiny_imagenet"),
                         class_ids=image_data.task_order("split_tiny_imagenet")[task], checkpoint_seed=6)
             table["original_uid"] = table.original_index.map(lambda i: "split_tiny_imagenet:task{}:row{}".format(task, i))
-            table.loc[table.original_index == table.original_index.min(), "class_id"] = 19
+            table.loc[table.original_index == table.original_index.min(), "class_id"] = 9
             path = self.root / ("task{}.csv".format(task))
             write_table(table, meta, path)
             paths.append(path)
@@ -266,6 +285,12 @@ class ImageWorkflowTests(unittest.TestCase):
             root, payload = advisor_study.read_plan(output / short / "plan.json")
             self.assertEqual(payload["settings"]["seeds"], [6])
             self.assertFalse(payload["settings"]["unsupervised"])
+            target = 19 if short == "tiny" else 9
+            self.assertEqual(payload["settings"]["target_task"], target)
+            _, steps = advisor_study.build_cell(root, payload["settings"], "ewc", 6)
+            final = next(s for s in steps if s["name"] == "task{}_victim".format(target))
+            argv = final["command"]
+            self.assertEqual(argv[argv.index("--tasknum") + 1], str(target + 1))
             profile = workflow.timing(root, payload)
             self.assertEqual(profile["cells"][0]["total"], 30)
             self.assertEqual(profile["cells"][0]["complete"], 0)

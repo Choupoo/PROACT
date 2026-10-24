@@ -1,7 +1,8 @@
-"""Explicit fixed-ten-task contracts for the meeting-3 transfer experiment.
+"""Explicit stage contracts for the transfer experiment and ImageNet extension.
 
 The legacy Task-9 protocol stays unchanged. Task indices here are zero based:
-source 1 is the second task; target 9 is the tenth task.
+source 1 is the second task; target 9 is the tenth task. tinyImageNet has 20
+tasks and uses target 19. The legacy default bounds remain unchanged.
 """
 
 import copy
@@ -19,26 +20,27 @@ TRANSFER_PROTOCOL = "source_supervised_task_transfer_v1"
 TASK_ORDER = [list(range(10 * t, 10 * (t + 1))) for t in range(10)]
 
 
-def task_index(value):
+def task_index(value, task_count=10):
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, np.integer))
-        or not 1 <= value <= 9
+        or not 1 <= value < task_count
     ):
-        raise ValueError("Incoming task must be a zero-based integer in 1..9.")
+        raise ValueError("Incoming task must be a zero-based integer in 1..{}.".format(task_count - 1))
     return int(value)
 
 
 def validate_checkpoint(checkpoint, expected_task=None):
     """Validate real metadata; never relabel an early checkpoint as Task 9."""
-    task = task_index(checkpoint.get("task_num"))
+    spec = dataset_spec(checkpoint.get("dataset", "split_cifar100"))
+    task = task_index(checkpoint.get("task_num"), spec["tasks"])
     if expected_task is not None and task != expected_task:
         raise ValueError("Checkpoint stage differs from requested incoming task.")
     # Reuse legacy structural checks on a copy, then apply the transfer contract.
     structure = dict(checkpoint, task_num=9)
     validate_victim_checkpoint(structure, transfer_datasets=True)
     if normalize_task_order(checkpoint["task_order"]) != task_order(checkpoint["dataset"]):
-        raise ValueError("Transfer requires the fixed ten-task class order.")
+        raise ValueError("Transfer requires the registered fixed class order.")
     return task
 
 
@@ -96,7 +98,8 @@ def load_defender(checkpoint, device, head_seed):
     from resnet import ResNet18
 
     task = validate_checkpoint(checkpoint)
-    width = dataset_spec(checkpoint["dataset"])["classes_per_task"]
+    spec = dataset_spec(checkpoint["dataset"])
+    width = spec["classes_per_task"]
     model = ResNet18(task + 1, width, nf=32).to(device)
     expected = model.state_dict()
     saved = checkpoint["model"]
@@ -105,9 +108,9 @@ def load_defender(checkpoint, device, head_seed):
         n.replace(".", "_") + "_fisher": p.shape for n, p in model.named_parameters()
     }
     # CL bookkeeping buffers are not forward-pass parameters. Validate against
-    # a full ten-head schema before ignoring them (RWALK scores can be signed).
+    # the registered full-head schema before ignoring them (RWALK scores can be signed).
     shapes = {name: param.shape for name, param in model.named_parameters()}
-    for index in range(task + 1, 10):
+    for index in range(task + 1, spec["tasks"]):
         shapes["heads.{}.weight".format(index)] = (width, model.emb_dim)
         shapes["heads.{}.bias".format(index)] = (width,)
     bookkeeping = {}
@@ -130,13 +133,13 @@ def load_defender(checkpoint, device, head_seed):
                 raise ValueError("Invalid CL bookkeeping buffer: " + key)
             continue
         future = re.fullmatch(r"heads\.(\d+)\.(weight|bias)", key)
-        if future and task < int(future.group(1)) < 10:
+        if future and task < int(future.group(1)) < spec["tasks"]:
             shape = (width, model.emb_dim) if future.group(2) == "weight" else (width,)
             if tuple(value.shape) != shape:
                 raise ValueError("Unexpected unused future head: " + key)
             continue
         future_fisher = re.fullmatch(r"heads_(\d+)_(weight|bias)_fisher", key)
-        if future_fisher and task < int(future_fisher.group(1)) < 10:
+        if future_fisher and task < int(future_fisher.group(1)) < spec["tasks"]:
             shape = (width, model.emb_dim) if future_fisher.group(2) == "weight" else (width,)
             if tuple(value.shape) != shape or (value < 0).any():
                 raise ValueError("Invalid unused future-head Fisher buffer: " + key)
@@ -173,7 +176,7 @@ def contract(metadata):
         raise ValueError("Missing transfer extraction metadata.")
     if metadata["transfer_protocol"] != TRANSFER_PROTOCOL:
         raise ValueError("Unsupported transfer protocol.")
-    task = task_index(metadata["task_index"])
+    task = task_index(metadata["task_index"], dataset_spec(metadata.get("dataset", "split_cifar100"))["tasks"])
     order = task_order(metadata.get("dataset", "split_cifar100"))
     if metadata.get("dataset", "split_cifar100") != "split_cifar100":
         if not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get("dataset_sha256", ""))):

@@ -1,4 +1,4 @@
-"""Run unmodified PROACT scripts with a fixed-ten-task dataset adapter."""
+"""Run unmodified PROACT scripts with a registered fixed-partition adapter."""
 
 import argparse
 import runpy
@@ -23,7 +23,6 @@ def main():
     )
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    task = task_index(args.incoming_task)
     ensure_output_path(Path.cwd())
     arguments = args.arguments
     if arguments and arguments[0] == "--":
@@ -32,12 +31,15 @@ def main():
     if args.data_manifest:
         from detector.image_data import PreparedData
         prepared = PreparedData(json.loads(Path(args.data_manifest).read_text()))
+    from detector.image_data import dataset_spec
+    tasks = dataset_spec(prepared.record["dataset"])["tasks"] if prepared is not None else 10
+    task = task_index(args.incoming_task, tasks)
     if args.script == "main_baselines.py":
         if (
             "--tasknum" not in arguments
-            or arguments[arguments.index("--tasknum") + 1] != "10"
+            or arguments[arguments.index("--tasknum") + 1] != str(tasks)
         ):
-            raise ValueError("Always pass --tasknum 10; do not repartition CIFAR.")
+            raise ValueError("--tasknum must match the registered {}-task partition.".format(tasks))
         if (
             "--lasttask" not in arguments
             or int(arguments[arguments.index("--lasttask") + 1]) != task

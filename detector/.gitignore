@@ -1,4 +1,6 @@
 work/
+data_downloads/
+data_prepared/
 __pycache__/
 tests/__pycache__/
 .ruff_cache/

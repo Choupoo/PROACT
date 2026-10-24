@@ -13,11 +13,11 @@ import torch
 from torch.utils.data import Dataset
 
 SPECS = {
-    "split_cifar100": dict(classes=100, classes_per_task=10, image_size=32,
+    "split_cifar100": dict(classes=100, tasks=10, classes_per_task=10, image_size=32,
                            train_per_class=500, test_per_class=100),
-    "split_mini_imagenet": dict(classes=100, classes_per_task=10, image_size=84,
+    "split_mini_imagenet": dict(classes=100, tasks=10, classes_per_task=10, image_size=84,
                                train_per_class=500, test_per_class=100),
-    "split_tiny_imagenet": dict(classes=200, classes_per_task=20, image_size=64,
+    "split_tiny_imagenet": dict(classes=200, tasks=20, classes_per_task=10, image_size=64,
                                train_per_class=500, test_per_class=50),
 }
 
@@ -29,8 +29,9 @@ def dataset_spec(name):
 
 
 def task_order(name):
-    width = dataset_spec(name)["classes_per_task"]
-    return [list(range(t * width, (t + 1) * width)) for t in range(10)]
+    spec = dataset_spec(name)
+    width = spec["classes_per_task"]
+    return [list(range(t * width, (t + 1) * width)) for t in range(spec["tasks"])]
 
 
 def array_sources(name, source):
@@ -143,7 +144,7 @@ class PreparedData:
         tensors = {"train": [], "test": []}
         for split, xkey, ykey in (("train", "train_data", "train_lbls"), ("test", "tst_data", "tst_lbls")):
             labels = arrays[ykey]
-            for task in range(10):
+            for task in range(dataset_spec(name)["tasks"]):
                 mask = (labels >= task * width) & (labels < (task + 1) * width)
                 images = torch.from_numpy(np.array(arrays[xkey][mask], copy=True))
                 if name == "split_mini_imagenet":
@@ -169,8 +170,9 @@ class PreparedData:
         return data, task_order(checkpoint["dataset"]), spec["image_size"], spec["classes_per_task"], 1
 
     def training(self, task, continuation, *args, **kwargs):
-        if kwargs.get("task_num") != 10 or kwargs.get("rnd_order") is not False:
-            raise ValueError("Require the fixed ten-task class partition.")
+        tasks = self.record["spec"]["tasks"]
+        if kwargs.get("task_num") != tasks or kwargs.get("rnd_order") is not False:
+            raise ValueError("Require the registered fixed class partition ({} tasks).".format(tasks))
         name = self.record["dataset"]
         if not np.array_equal(kwargs.get("order"), np.arange(self.record["spec"]["classes"])):
             raise ValueError("Unexpected class order.")
@@ -180,12 +182,12 @@ class PreparedData:
         self._load()
         data = {}
         width = self.record["spec"]["classes_per_task"]
-        for t in range(10):
+        for t in range(tasks):
             data[t] = dict(name=name, ncla=width)
             for split in ("train", "test"):
                 x, y = self.tensors[split][t]
                 data[t][split] = dict(x=x, y=y)
         data["ncla"] = self.record["spec"]["classes"]
-        stop = task + 1 if continuation else 10
+        stop = task + 1 if continuation else tasks
         size = self.record["spec"]["image_size"]
         return data, [(t, width) for t in range(stop)], [3, size, size], task_order(name)
