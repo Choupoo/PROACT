@@ -1,0 +1,516 @@
+% !TeX root = ../main.tex
+
+\section{Experimental Setup}
+\label{sec:experimental-setup}
+
+The experiments separate three questions: whether the descriptors rank
+poisoned images above clean images, whether a threshold calibrated on earlier
+tasks remains useful on a later task, and whether historical inversion
+samples are sufficient for detection without labelled poisoning examples.
+Feature-removal experiments address which parts of the supervised
+representation contribute to these decisions. Paired training controls
+measure the forgetting induced by the attack independently of the detector.
+
+The completed main study uses CIFAR-100 with five continual-learning
+implementations and three seeds. A smaller extension retains the full
+miniImageNet and tinyImageNet datasets but restricts the learner to EWC.
+The latter experiments were still running when this chapter was prepared;
+their configuration is recorded separately below, without treating planned
+runs as completed observations.
+
+\subsection{Datasets and Task Sequences}
+\label{subsec:setup-datasets}
+
+CIFAR-100 contains 100 classes of $32\times32$ colour images, with 500
+training and 100 test images per class~\cite{krizhevsky2009learning}.
+The main study uses ten tasks of ten classes. The class order is fixed:
+task $t$ contains global class identifiers $10t,\ldots,10t+9$. Seeds change
+model training and attack generation, not the class order or the underlying
+image collection.
+
+The additional benchmarks follow the task counts used in the BrainWash
+study~\cite{abbasi2024brainwash}: ten tasks for miniImageNet and twenty for
+tinyImageNet. Both have ten classes per task. Table~\ref{tab:setup-datasets}
+summarises the data used by the registered protocols. Images retain their
+native benchmark resolution and are represented as floating-point RGB
+arrays in $[0,1]$. Poisoned images are clipped back to this interval.
+
+\begin{table}[tbp]
+\centering
+\small
+\begin{tabular}{lrrrr}
+\toprule
+Dataset & Classes & Resolution & Tasks & Train/test per class\\
+\midrule
+CIFAR-100 & 100 & $32\times32$ & 10 & 500 / 100\\
+miniImageNet & 100 & $84\times84$ & 10 & 500 / 100\\
+tinyImageNet & 200 & $64\times64$ & 20 & 500 / 50\\
+\bottomrule
+\end{tabular}
+\caption{Full benchmark splits. For tinyImageNet, ``test'' refers to the
+labelled validation images; the unlabelled test split is not used.}
+\label{tab:setup-datasets}
+\end{table}
+
+The prepared miniImageNet arrays preserve the existing training/test split
+provided with the experimental assets. The tinyImageNet conversion keeps
+all official training images and uses the annotated validation images for
+evaluation of the continual learner. Its global class identifiers are
+assigned by sorted class names. File hashes, class counts, image shapes
+and the conversion record are checked before plan registration. No
+class-balanced subset or reduced-image training run is substituted for the
+full benchmark.
+
+Two uses of the word ``test'' must be distinguished. The benchmark test
+split measures the continual learner's class accuracy. The detector test
+split is held out from a task's \emph{training} originals, because the
+detector is intended to inspect incoming training data. These are different
+image pools serving different measurements.
+
+\subsection{Task Roles and Data Separation}
+\label{subsec:setup-task-roles}
+
+The source is incoming Task 1. The model used to describe it has learned
+clean Task 0, but not Task 1. Source clean/BrainWash pairs fit the scaler
+and logistic regression. Clean validation and reserve images from Tasks 1
+and 4 calibrate the thresholds. The Task 4 detector test split is a
+development diagnostic. Final CIFAR-100 evaluation uses incoming Task 9,
+whose backbone has learned clean Tasks 0--8.
+
+Each stage has its own clean pre-update checkpoint and historical
+inversions. A source attack is not propagated through the training history
+to create the target checkpoint. Although source and target classes are
+disjoint, the later clean backbone has legitimately learned the source
+task. The training histories should therefore not be described as
+independent populations.
+
+Within every incoming task, the 500 training originals per class are
+assigned to the splits in Table~\ref{tab:setup-splits}. The assignment is
+stratified and uses a fixed split seed. Clean, BrainWash and random-control
+views of one original always remain together. An image cannot contribute
+its clean view to regression training and its poisoned view to detector
+testing.
+
+\begin{table}[tbp]
+\centering
+\begin{tabular}{lrrp{6.0cm}}
+\toprule
+Split & Per class & Per task & Use\\
+\midrule
+Training & 300 & 3000 & Source regression and scaler fitting\\
+Validation & 50 & 500 & Clean sample-threshold calibration on Tasks 1 and 4\\
+Reserve & 100 & 1000 & Clean count-threshold calibration on Tasks 1 and 4\\
+Test & 50 & 500 & Development or final detector metrics, depending on task\\
+\bottomrule
+\end{tabular}
+\caption{Detector splits from each ten-class incoming task's 5000 training
+originals. All 5000 remain available to the attack and full-task training
+controls. Target training, validation and reserve partitions do not fit
+the detector.}
+\label{tab:setup-splits}
+\end{table}
+
+The source regression consequently receives 3000 clean negatives and 3000
+BrainWash positives. These are 6000 feature rows from 3000 originals, not
+6000 independently sampled images. The source and calibration attacks use
+reckless BrainWash at budget 0.3. Random-control views are scored for
+evaluation but are not added as training negatives. The target sample
+comparison uses 500 clean and 500 poisoned detector-test views, with the
+500 random-control views reported separately.
+
+Table~\ref{tab:setup-information} records the information boundary. Avoiding
+target detector fitting does not mean that every part of the experiment is
+label-free: class labels are needed to train the continual learner and
+construct the benchmark, and source poisoning labels train the regression.
+
+\begin{table}[tbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{5.0cm}X}
+\toprule
+Information & Permitted use\\
+\midrule
+True image classes & CL training, attack generation, stratified splits and offline accuracy; not incoming descriptor extraction\\
+Source clean/poison labels & Supervised regression fitting\\
+Historical clean status & Supervised validation/reserve calibration; trust assumption for inversion references\\
+Target clean/poison labels & Offline mixture construction and metric calculation only\\
+Incoming descriptor values & Frozen scoring or direct reference comparison; not scaler or threshold fitting\\
+\bottomrule
+\end{tabularx}
+\caption{Information available to each part of the experiment. Historical
+inversion targets are not incoming-image class labels.}
+\label{tab:setup-information}
+\end{table}
+
+\subsection{Continual Learners and Pre-Update Models}
+\label{subsec:setup-learners}
+
+The backbone is the ResNet-18-style implementation supplied with the
+experimental repository, based on residual networks~\cite{he2016deep}.
+It is not an unmodified \texttt{torchvision} ImageNet model. Its initial
+width is 32 channels, its four residual stages have widths 32, 64, 128 and
+256, and adaptive $2\times2$ pooling gives a 1024-dimensional vector before
+the task heads. Each task has a separate ten-class linear head. Task
+identity is known, so the continual-learning evaluation is
+task-incremental.
+
+The completed comparison includes EWC~\cite{kirkpatrick2017ewc},
+MAS~\cite{aljundi2018mas}, RWalk~\cite{chaudhry2018rwalk}, and the
+repository's EWC-based AFEC~\cite{wang2021afec} and
+ANCL~\cite{kim2023ancl} variants. Table~\ref{tab:setup-cl} gives their
+registered coefficients. These are coefficients in the respective
+implementations; their magnitudes are not comparable measures of
+regularisation strength across methods.
+
+\begin{table}[tbp]
+\centering
+\begin{tabular}{lrr}
+\toprule
+Implementation & Main coefficient & Auxiliary coefficient\\
+\midrule
+EWC & 500000 & ---\\
+MAS & 10 & ---\\
+RWalk & 1 & ---\\
+AFEC-EWC & 500000 & 100\\
+ANCL-EWC & 500000 & 100\\
+\bottomrule
+\end{tabular}
+\caption{Coefficients fixed in the CIFAR-100 plan. AFEC-EWC and ANCL-EWC
+require the implementation qualification in
+Section~\ref{subsec:setup-validity}.}
+\label{tab:setup-cl}
+\end{table}
+
+Victim and continuation training use 100 epochs per learned task, SGD with
+learning rate 0.01, batch size 16 and gradient-norm clipping at 100.
+The detector reads each checkpoint \emph{before} its incoming task is
+learned. Its incoming head is reset with seed 20260720 and is held fixed
+throughout extraction, including historical-reference extraction. The
+feature-extraction seed is 20260721. No defender update is performed to
+obtain the per-image descriptors.
+
+The choice of 100 training epochs and the detector-specific task roles
+defines this experiment. The study uses BrainWash configurations as a
+controlled test bed; it does not claim an exact reproduction of every
+setting or number in the original paper's main table.
+
+\subsection{Attack Generation and Random Controls}
+\label{subsec:setup-attacks}
+
+Historical inversion generates 128 synthetic samples for each preceding
+task, using 2000 optimisation iterations and the repository's
+BatchNorm-regularised inversion procedure. These are 128 samples per
+\emph{task}, not per class. Inversion provides historical examples for the
+attack and for the reference-based detectors; the supervised regression is
+trained on real source-task images instead.
+
+For every method and seed, four target configurations combine reckless
+and cautious BrainWash with $\ell_\infty$ budgets 0.1 and 0.3. These are
+four configurations of one attack family, not four independent attack
+families. Table~\ref{tab:setup-attack} records the common optimisation
+settings. The cautious objective uses the fixed incoming-task weight
+$w_{\mathrm{cur}}=1$.
+
+\begin{table}[tbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{5.5cm}X}
+\toprule
+Component & Setting\\
+\midrule
+Source/development attack & Reckless, $\epsilon=0.3$\\
+Target settings & Reckless/cautious $\times$ $\epsilon\in\{0.1,0.3\}$\\
+Outer attack iterations & 5000 (called epochs in the code)\\
+Inner optimisation & One SGD step; learning rate 0.001\\
+Attack minibatch size & 128\\
+Perturbation sign-step size & 0.005, projected to the declared budget\\
+Head reset during attack & Every outer iteration\\
+Historical data & Inversion samples; no real historical replay in the attack\\
+Saved perturbation used & \texttt{latest\_noise} with its stored image permutation\\
+\bottomrule
+\end{tabularx}
+\caption{Attack-generation settings. The repeated attack-time head reset
+is separate from the detector's single fixed-head initialisation.}
+\label{tab:setup-attack}
+\end{table}
+
+The perturbation tensor is stored in the shuffled image order used by the
+attacker. Extraction inverts this permutation to align each original with
+its own modified view. Both detector evaluation and the poisoned
+continuation use the saved latest perturbation, rather than silently
+substituting the separately stored best-so-far field.
+
+Attack optimisation sees the full incoming-task training pool, including
+originals subsequently assigned to the detector test split. The test
+originals are held out from \emph{detector fitting and calibration}, not
+from attack generation. One perturbation artifact is generated for each
+task/attack configuration and reused to construct all poisoning-fraction
+simulations. The attacker is not rerun for every simulated dataset or
+every fraction.
+
+For the random control, each pixel receives independent uniform noise in
+$[-\epsilon,\epsilon]$, followed by clipping the image to $[0,1]$.
+The control uses the same budget as BrainWash, but its realised $\ell_2$
+norm is not matched to the attack. Its extraction seed is 20260722, with
+an image-index offset. The uniform-noise continuation controls use
+separate draws at the same budget, not necessarily the exact random views
+scored by the detector. Since random perturbations can also damage
+retention, their alert rates are reported as noise sensitivity rather than
+being included in clean false-positive rates.
+
+\subsection{Supervised Fitting, Calibration and Ablations}
+\label{subsec:setup-supervised}
+
+StandardScaler and logistic regression are fitted on source-training
+clean/poison rows only. Regression uses the L-BFGS solver, $C=1$, an
+$\ell_2$ penalty, at most 2000 solver iterations and classifier seed
+20260924. Hyperparameters are unchanged across methods and seeds; the
+fitted coefficients and scaler are specific to each run.
+
+The principal threshold rule is \texttt{history\_mad}, as defined in
+Section~\ref{subsec:methods-thresholds}. It was fixed after the earlier
+seed-5 pilot and before the expanded seeds 6--8. The source-quantile and
+historical-quantile rules are also frozen and evaluated as comparisons.
+Task 4 test data are used to check the fixed rule, not to choose a
+replacement when the target result is disappointing. Final sample and
+count cutoffs use full stored precision. Scores produced by different
+fitted models are not assumed to share a calibrated probability scale.
+
+Nine feature variants are fitted, including the full detector
+(Table~\ref{tab:setup-ablations}). Every reduced model is retrained from
+the same source originals and recalibrated using the same historical
+splits. Removing a feature is not implemented by zeroing it at prediction
+time. The stage variant replaces the 80 tensor norms with five stage
+norms but keeps the same four context features, isolating granularity.
+
+\begin{table}[tbp]
+\centering
+\small
+\begin{tabularx}{\textwidth}{p{5.2cm}rX}
+\toprule
+Variant & Inputs & Retained information\\
+\midrule
+Full & 84 & 80 tensor norms and four context features\\
+Gradients only & 80 & Tensor norms\\
+Context only & 4 & Entropy, confidence, margin and activation norm\\
+Stage norms with context & 9 & Five stage norms and four context features\\
+Without entropy & 83 & Full set minus entropy\\
+Without confidence & 83 & Full set minus confidence\\
+Without margin & 83 & Full set minus margin\\
+Without activation norm & 83 & Full set minus activation norm\\
+Without uncertainty & 81 & Tensor norms and activation norm\\
+\bottomrule
+\end{tabularx}
+\caption{Supervised feature variants. The final row removes entropy,
+confidence and margin together.}
+\label{tab:setup-ablations}
+\end{table}
+
+\subsection{Simulated Incoming Datasets}
+\label{subsec:setup-bags}
+
+A dataset-level evaluation samples $N=150$ distinct originals without
+replacement from the 500-original detector test pool. At requested
+contamination fraction $r$, the number of modified views is
+\begin{equation}
+    m(r)=\left\lfloor150r+\frac{1}{2}\right\rfloor.
+    \label{eq:setup-rounded-count}
+\end{equation}
+The first $m(r)$ positions in the randomly ordered sample use the modified
+view and the remaining positions use the clean view. An original therefore
+appears only once in a bag, never as both a clean and a poisoned image.
+Sampling is not forced to give exactly equal class counts within each bag.
+
+\begin{table}[tbp]
+\centering
+\begin{tabular}{rrr}
+\toprule
+Requested fraction & Modified images & Realised fraction\\
+\midrule
+0\% & 0 & 0\%\\
+1\% & 2 & 1.33\%\\
+5\% & 8 & 5.33\%\\
+10\% & 15 & 10\%\\
+25\% & 38 & 25.33\%\\
+50\% & 75 & 50\%\\
+100\% & 150 & 100\%\\
+\bottomrule
+\end{tabular}
+\caption{Requested and realised contamination for 150-image datasets. The
+same counts are used for uniform-perturbation comparisons.}
+\label{tab:setup-rates}
+\end{table}
+
+There are 100 repeated simulations per fraction. A zero-fraction bag is
+entirely clean. Positive-fraction scenarios are constructed separately
+using BrainWash or uniform-noise views. Originals recur across repetitions,
+so the simulations measure conditional variability within a finite pool;
+they are not 100 independent datasets or attack runs. The same clean
+simulations are reused across the four attacks within a method/seed, and
+repeated clean columns are not counted as additional experiments.
+
+Rank and MMD are evaluated on identical bags within their direct
+comparison. Their sampling stream is separate from the supervised
+evaluation, so shared fractions alone should not be taken to imply
+identical sampled membership across all three detectors.
+
+\subsection{Reference-Based Comparison}
+\label{subsec:setup-reference}
+
+For CIFAR-100 Task 9, each of the nine historical tasks supplies 128
+inversion descriptors. All reference and incoming descriptors use the
+same frozen Task 9 model and the predicted-class feature protocol. Fitting
+the Rank and MMD reference bundles precedes reading the incoming benchmark.
+Neither bundle is calibrated using trusted clean images from the incoming
+task.
+
+Rank uses the ten descriptors and the historical-only pair-selection rule
+in Section~\ref{subsubsec:methods-rank}. Its reference cap is 256 images per
+historical task, so all 128 available images are retained. Each incoming
+bag is tested in full. It uses 499 Gaussian multiplier draws and comparison
+level 0.05. Unsupported bags are reported through coverage and are not
+silently counted as accepted clean data.
+
+MMD uses a 50\% historical preprocessing-fit fraction, a bank cap of 512
+rows, 128 random Fourier components and 199 permutations. With the
+1152 available historical descriptors, this leaves 576 fit rows, 512 bank
+rows and 64 unused rows. The coordinate scale floor is $10^{-8}$ and the
+standardised clipping limit is 12. Both tests use fixed random seeds and
+the declared reference identities. The comparison is between a pooled
+distribution discrepancy and taskwise rank dependence; it is not a test
+of two algorithms operating on the supervised 84-feature representation.
+
+\subsection{Evaluation Measures and Forgetting Controls}
+\label{subsec:setup-metrics}
+
+Image-level evaluation reports ROC-AUC and average precision on the
+balanced clean/poison test views. Clean false-positive rate and poisoned
+true-positive rate are then measured at the frozen cutoff. ROC-AUC
+summarises ranking across thresholds~\cite{fawcett2006roc}; it does not
+establish that the selected operating threshold transfers successfully.
+Uniform-noise alert rates are reported separately.
+
+At dataset level, the clean false-alert rate is the fraction of clean
+simulations that alert. Detection at a given contamination count is the
+fraction of the corresponding poisoned simulations that alert. Coverage
+is reported for Rank when comparisons are unsupported. A low alert rate
+cannot be interpreted as low false-positive rate unless clean and
+poisoned scenarios are distinguished.
+
+For the main study, metrics are reported per seed and summarised by their
+mean and sample standard deviation across seeds 6, 7 and 8. The seed is
+the repeated training/attack run; the simulated bag is not used as an
+independent replicate for a population-level confidence claim. The
+class order, benchmark and final task have been examined in earlier
+development, so later seeds provide a robustness check within that
+setting rather than independent confirmation on a new population.
+
+Forgetting is measured by continuing the same pre-update checkpoint on
+the full incoming task under clean, BrainWash and uniform-noise conditions.
+Let $a_{t,j}^{(q)}$ be class-test accuracy on task $j$ after condition $q$
+learns task $t$. The historical mean and backward transfer are
+\begin{align}
+    A_{t,\mathrm{past}}^{(q)}
+       &=\frac{1}{t}\sum_{j=0}^{t-1}a_{t,j}^{(q)},\\
+    \operatorname{BWT}_{t}^{(q)}
+       &=\frac{1}{t}\sum_{j=0}^{t-1}
+                   \bigl(a_{t,j}^{(q)}-a_{j,j}^{(q)}\bigr).
+    \label{eq:setup-retention}
+\end{align}
+Backward transfer follows the usual continual-learning
+definition~\cite{lopezpaz2017gem}. The extra historical accuracy loss is
+\begin{equation}
+    \Delta_t^{\mathrm{BW}}
+       =A_{t,\mathrm{past}}^{(\mathrm{clean})}
+        -A_{t,\mathrm{past}}^{(\mathrm{BW})}.
+    \label{eq:setup-attack-damage}
+\end{equation}
+Differences are reported in percentage points, together with incoming-task
+accuracy. These controls train on the full 5000-image incoming task, not
+on the 150-image detector bags. Their measured damage is therefore not
+the damage caused by, for example, eight poisoned images in a bag.
+No continuation filters images using detector predictions, so these
+measurements do not establish detector-based prevention of forgetting.
+
+\subsection{Run Matrix and Reproducibility}
+\label{subsec:setup-reproducibility}
+
+The completed CIFAR-100 matrix has five implementations, three seeds and
+four target attack settings: 15 method/seed cells and 60 target
+configurations. Each cell has nine supervised feature variants, three
+frozen threshold-rule comparisons, Rank/MMD evaluation and paired
+forgetting controls. The supplied run-state records mark all 540
+registered stages complete. Completion refers to execution and recorded
+outputs, not to a detector meeting its intended error rate.
+
+The archived environment uses Python 3.8.20, PyTorch 1.10.1, torchvision
+0.11.2, NumPy 1.24.4, pandas 2.0.3, SciPy 1.10.1 and scikit-learn 1.3.2.
+GPU work runs on Tesla V100 cards with 16 GB memory. Independent cells
+can run on separate cards; a single attack is not distributed across
+cards. Hardware occupancy and subprocess wall time are not reported as
+GPU kernel time or as a promise of reproducibility at identical speed.
+
+Plans record settings and source hashes. Checkpoints, inversion files,
+attack permutations, feature metadata and split manifests preserve data
+and model identity. Completed stages are reused only after output-hash
+verification. An interrupted stage is archived and restarted; recovery
+is stage-level, not an epoch checkpoint. These checks identify accidental
+mixing of runs, but do not make stochastic GPU execution bitwise
+deterministic.
+
+\subsection{Full-Data ImageNet Extension}
+\label{subsec:setup-extension}
+
+The registered extension uses EWC only, two seeds (6 and 7), the same four
+target attack settings and the same nine supervised feature groups.
+Source fitting and clean calibration remain on Tasks 1 and 4. The final
+task is 9 for miniImageNet and 19 for tinyImageNet. Feature definitions,
+the form of the threshold rule and the data-split counts remain unchanged;
+the scaler, regression and numerical cutoffs are fitted separately for
+each dataset and seed. This tests transfer to a later task \emph{within}
+each dataset. It does not test applying a CIFAR-trained detector to
+ImageNet without fitting or calibration.
+
+The plan has four dataset/seed cells and sixteen target configurations.
+It retains all training images and the registered training and attack
+iterations. Rank and MMD are not part of this extension. Results are to be
+reported only for cells that actually finish; the plan itself provides
+no evidence of detection performance or generalisation.
+
+The new schedule avoids repeating identical clean continuation training
+for all four attacks, shares uniform continuation at the same budget,
+and reuses compatible clean and random-control feature measurements.
+Poison features remain attack-specific, and different task checkpoints
+are not interchangeable. This gives 30 stages per cell rather than the
+completed CIFAR schedule's 36, without treating the reduced stage count
+as a proportional runtime reduction. One GPU processes miniImageNet and
+the other tinyImageNet; each processes its two seeds sequentially.
+
+\subsection{Implementation Qualifications and Scope}
+\label{subsec:setup-validity}
+
+The detector code adapts task visibility and data loading while executing
+the upstream learner and attack implementations without editing them.
+This preserves the distinction between detector changes and changes to
+the continual-learning baseline. It also means that limitations of an
+upstream implementation remain relevant to the resulting checkpoints.
+
+In AFEC-EWC and ANCL-EWC, source inspection identified a first-task path
+that replaces the auxiliary model after its optimiser has been created,
+without rebuilding that optimiser on the default path. The saved runs
+must consequently be identified as results from these repository
+implementations, not as independently verified reproductions of the
+published auxiliary-network algorithms. Their outputs are retained and
+reported with this qualification; they are not used to establish a
+general claim about canonical AFEC or ANCL. The main EWC, MAS and RWalk
+observations should be discussed separately from them.
+
+Other limits concern the experimental design rather than execution.
+There is one fixed class order, one attack family with four settings,
+and a finite image pool reused across simulations. Poisoning labels
+are available for supervised source fitting, while the reference-based
+methods assume clean historical checkpoints and useful inversion
+samples. No method is recalibrated on the final incoming task, no
+unsupported reference comparison is converted into a clean decision,
+and no filtering benefit is inferred from detection alone. These
+boundaries determine which conclusions the results can support.

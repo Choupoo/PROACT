@@ -1,0 +1,424 @@
+% !TeX root = ../main.tex
+
+\section{Detection Methods}
+\label{sec:methods}
+
+The detector examines an incoming training dataset before the continual
+learner is updated. It asks whether the images contain evidence of a
+forgetting attack; it does not use the detection decision to change the
+learner in the experiments reported here. Two information settings are
+considered. The supervised detector learns from clean and BrainWash-poisoned
+images on an earlier task. The reference-based methods instead compare the
+incoming data with synthetic samples obtained by inverting historical
+models. They do not fit a clean/poison classifier.
+
+Both settings use responses of a frozen model. They differ in what is learned
+from those responses and in how a dataset decision is made. In particular,
+Rank is not the aggregation rule for the supervised detector: the supervised
+dataset decision is obtained by counting image-level logistic-regression
+alerts. Rank performs a separate, direct comparison of dataset-level feature
+correlations.
+
+\subsection{Features of a Frozen Continual Learner}
+\label{subsec:methods-features}
+
+\subsubsection{The incoming head as a fixed probe}
+
+Tasks are indexed from zero. Before incoming task $t$, the backbone
+$g_{\theta_{<t}}$ has learned the preceding clean tasks
+$0,\ldots,t-1$. An untrained head $h_t$ is attached to this backbone for the
+$K$ incoming classes. Its parameters are initialised with a fixed seed and
+kept unchanged during extraction. The predictive vector is
+\begin{equation}
+    p_t(x)=\operatorname{softmax}
+    \bigl(h_t(g_{\theta_{<t}}(x))\bigr),
+    \qquad
+    \widehat{k}_t(x)=\operatorname*{argmax}_{1\leq k\leq K}p_{t,k}(x).
+    \label{eq:methods-probe}
+\end{equation}
+The head has not learned to classify the incoming images. Its output is a
+repeatable probe of the current representation, rather than an estimate of
+the image's correct class. Reusing its initialisation prevents differences
+between clean and modified views from being caused by different random
+heads. It does not eliminate differences between backbones trained on
+different histories.
+
+For each image, the extraction loss is
+\begin{equation}
+    \ell_t(x)=-\log p_{t,\widehat{k}_t(x)}(x).
+    \label{eq:methods-predicted-loss}
+\end{equation}
+The predicted class is treated as a fixed target for this backward pass.
+The true image-class label is not read. This is different from taking the
+gradient of cross-entropy with respect to the true class and merely removing
+that label from the saved feature table. The loss in
+Equation~\eqref{eq:methods-predicted-loss} also contains no continual-learning
+regularisation term.
+
+The model remains in evaluation mode. Gradients are calculated without an
+optimiser step, and neither the parameters nor the BatchNorm running
+statistics are updated. Each image is processed separately, so its features
+do not depend on the other members of a simulated dataset.
+
+\subsubsection{Parameter-tensor gradient norms}
+
+Let $\Theta_1,\ldots,\Theta_L$ denote the backbone's parameter tensors,
+excluding every task head. The gradient feature associated with tensor
+$\Theta_\ell$ is
+\begin{equation}
+    v_{t,\ell}(x)=
+    \left\|\nabla_{\Theta_\ell}\ell_t(x)\right\|_{\mathrm{F}},
+    \qquad \ell=1,\ldots,L.
+    \label{eq:methods-tensor-norm}
+\end{equation}
+The Frobenius norm here is the Euclidean norm after flattening the tensor.
+One convolutional weight tensor therefore supplies one feature, not one
+feature per scalar weight. Biases and the trainable BatchNorm scale and
+offset tensors are retained separately. In the implemented backbone this
+gives $L=80$ features.
+
+These norms preserve where gradient magnitude occurs in the network while
+discarding directions within a tensor. A coarser description combines
+tensors into the stem and four residual stages. If $\mathcal{S}_q$ is the
+set of tensors in stage $q$, its norm is
+\begin{equation}
+    v^{\mathrm{stage}}_{t,q}(x)=
+    \left(\sum_{\ell\in\mathcal{S}_q}v_{t,\ell}(x)^2\right)^{1/2}.
+    \label{eq:methods-stage-norm}
+\end{equation}
+The corresponding global norm combines all five stages in the same way.
+This relation makes the stage-level ablation a controlled reduction in
+granularity, rather than a change of gradient target or model state.
+
+\subsubsection{Prediction and activation features}
+
+Four additional features describe the same frozen forward pass. Writing
+$p_{t,(1)}(x)$ and $p_{t,(2)}(x)$ for the largest and second-largest entries
+of $p_t(x)$, these are
+\begin{align}
+    H_t(x)&=-\sum_{k=1}^{K}p_{t,k}(x)\log p_{t,k}(x),
+        &c_t(x)&=p_{t,(1)}(x), \label{eq:methods-uncertainty-a}\\
+    m_t(x)&=p_{t,(1)}(x)-p_{t,(2)}(x),
+        &a_t(x)&=\|g_{\theta_{<t}}(x)\|_2.
+        \label{eq:methods-uncertainty-b}
+\end{align}
+The activation is the vector entering the incoming head, after pooling and
+flattening. Entropy, confidence and margin describe the probe response;
+none is assumed to be calibrated for incoming-class accuracy.
+
+The full supervised feature vector is
+\begin{equation}
+    \varphi_t(x)=
+    \bigl(v_{t,1}(x),\ldots,v_{t,80}(x),H_t(x),c_t(x),m_t(x),a_t(x)\bigr)
+    \in\mathbb{R}^{84}.
+    \label{eq:methods-full-feature}
+\end{equation}
+True-class probability, the loss itself, and cosine similarities with
+historical gradients are not classifier inputs. Some of these quantities
+are retained as extraction diagnostics in the implementation. Their
+availability in an output file does not mean they belong to the fitted
+detector. The supervised score has no inversion-derived input, although the
+experimental pipeline still uses inversions to generate attacks and
+reference-based diagnostics.
+
+\subsection{Supervised Image Scoring}
+\label{subsec:methods-supervised}
+
+The source task supplies pairs $(x_i,x_i^{\mathrm{BW}})$, where
+$x_i^{\mathrm{BW}}$ is the BrainWash-modified version of original $x_i$.
+The detector label is $z_i=0$ for the clean view and $z_i=1$ for the poisoned
+view. This binary label is unrelated to the image-class label used by the
+continual learner. Both views of an original stay in the same data split.
+
+For each feature coordinate, a mean $\mu_j$ and standard deviation $s_j$
+are fitted using source-training rows only. The transformed input is
+\begin{equation}
+    \widetilde{\varphi}_{t,j}(x)
+       =\frac{\varphi_{t,j}(x)-\mu_j}{s_j},
+    \label{eq:methods-scaling}
+\end{equation}
+with constant coordinates handled by the scaler without division by zero.
+The scaler is reused on later tasks. No target mean or variance is
+estimated to align the target features with the source.
+
+A logistic regression maps the standardised features to
+\begin{equation}
+    s_t(x)=\sigma\bigl(b+w^\top\widetilde{\varphi}_t(x)\bigr),
+    \qquad \sigma(u)=(1+\exp(-u))^{-1}.
+    \label{eq:methods-logistic-score}
+\end{equation}
+The fit minimises binary cross-entropy with an $\ell_2$ penalty on $w$.
+In the implementation's summed-loss convention, the objective is equivalent
+to
+\begin{equation}
+    \frac{1}{2}\|w\|_2^2+
+    C\sum_{i\in\mathcal{I}_{\mathrm{fit}}}
+    \left[-z_i\log s(x_i)-(1-z_i)\log(1-s(x_i))\right],
+    \label{eq:methods-logistic-objective}
+\end{equation}
+where $C=1$ and the intercept is not penalised. Clean and poisoned views have
+equal training weight. Randomly perturbed images are excluded from the fit.
+
+The regression is fitted once for each continual-learning implementation,
+seed and feature variant. Its coefficients are not refitted for different
+target poisoning fractions or attack settings. A large score indicates
+similarity to the source poisoning examples in this representation; it is
+not a calibrated probability that an arbitrary deployment image is
+poisoned.
+
+\subsection{From Image Scores to a Dataset Alert}
+\label{subsec:methods-thresholds}
+
+Two thresholds are needed. A sample threshold $\tau$ marks suspicious
+images, and a count threshold $c_\star$ determines whether there are enough
+such images to alert on the dataset. Averaging image scores or fitting a
+second logistic regression on datasets is not the decision procedure used
+in the final experiments.
+
+\subsubsection{Historical sample-threshold calibration}
+
+Let $\mathcal{H}$ be the declared source and development tasks, and let
+$V_h$ contain the clean validation images of task $h\in\mathcal{H}$.
+For each task, $\tau_h^{Q}$ is chosen so that the observed fraction of
+scores at or above it is at most $\alpha_s$. The implementation sorts the
+scores and places the threshold just above the appropriate order statistic,
+which also handles tied scores conservatively. Here $\alpha_s=0.05$.
+
+The robust historical rule supplements this clean quantile with a cutoff
+in logit space. For validation scores clipped to
+$[10^{-12},1-10^{-12}]$, define
+\begin{align}
+    u_h(x)&=\log\frac{\operatorname{clip}(s_h(x))}
+                              {1-\operatorname{clip}(s_h(x))},\\
+    M_h&=\operatorname{median}_{x\in V_h}u_h(x),
+    \qquad
+    D_h=1.4826\operatorname{median}_{x\in V_h}|u_h(x)-M_h|.
+    \label{eq:methods-mad}
+\end{align}
+The chosen sample threshold is
+\begin{equation}
+    \tau=\max_{h\in\mathcal{H}}
+          \left\{\tau_h^{Q},\;\sigma(M_h+3D_h)\right\}.
+    \label{eq:methods-historical-cutoff}
+\end{equation}
+Taking the larger within-task cutoff never lowers the empirical clean
+quantile. Taking the maximum across tasks favours conservative alerts on
+the observed histories. Neither operation establishes that the same clean
+score distribution will hold on the next task.
+
+Two simpler rules are retained for comparison: the source clean quantile
+alone, and the maximum clean quantile over the historical calibration
+tasks. The principal rule in Equation~\eqref{eq:methods-historical-cutoff},
+called \texttt{history\_mad} in the implementation, was fixed before the
+expanded runs. The development-task test results diagnose that choice;
+they do not trigger a switch to whichever rule performs best on the target.
+
+\subsubsection{Count calibration on separate clean originals}
+
+The sample threshold is applied to clean reserve sets that are disjoint from
+the validation images used above. Let $J_h$ of the $M_h^{\mathrm{res}}$
+reserve images on historical task $h$ exceed $\tau$. A one-sided
+Clopper--Pearson bound~\cite{clopper1934binomial} gives
+\begin{equation}
+    p_h^+=
+    \begin{cases}
+      1, & J_h=M_h^{\mathrm{res}},\\
+      F_{\mathrm{Beta}(J_h+1,M_h^{\mathrm{res}}-J_h)}^{-1}(1-\eta),
+          & J_h<M_h^{\mathrm{res}},
+    \end{cases}
+    \label{eq:methods-cp}
+\end{equation}
+where $F^{-1}$ denotes the beta quantile. The maximum historical bound,
+$p^+=\max_h p_h^+$, is used for count calibration. For dataset size $N$,
+\begin{equation}
+    c_\star=\min\left\{c\in\{0,\ldots,N+1\}:
+         \Pr\{\operatorname{Bin}(N,p^+)\geq c\}\leq\gamma\right\}.
+    \label{eq:methods-critical-count}
+\end{equation}
+The nominal budget is split as $\eta=\gamma=0.025$. The value $N+1$
+represents an unattainable cutoff if no count up to $N$ satisfies the tail
+criterion.
+
+For an incoming dataset $B=\{x_1,\ldots,x_N\}$, the supervised decision is
+\begin{equation}
+    C(B)=\sum_{i=1}^{N}\mathbf{1}\{s_t(x_i)\geq\tau\},
+    \qquad
+    A(B)=\mathbf{1}\{C(B)\geq c_\star\}.
+    \label{eq:methods-dataset-decision}
+\end{equation}
+The count is calculated directly from the frozen image scores. Its
+calibration assumes an appropriate binomial model for clean alerts and
+stability of the clean alert probability. Class-dependent images, repeated
+sampling from a finite pool, and task shift all require caution. In this
+study the calculation is a historical calibration heuristic, not a
+guarantee of a 5\% target false-positive rate. The empirical target clean
+alert rate must be measured separately.
+
+\subsection{Historical-Reference Tests Without Poisoning Labels}
+\label{subsec:methods-unsupervised}
+
+The reference-based setting removes access to labelled clean/poison
+examples for detector fitting. It assumes instead that the historical
+learner and its inversion samples are trustworthy. Synthetic inversion
+targets remain available when reconstructing historical images. This
+assumption is distinct from knowing which incoming images are clean.
+
+The incoming data and the references are described with the same frozen
+backbone and incoming head. These methods use a fixed ten-dimensional
+descriptor: the global gradient norm, five stage norms, entropy,
+confidence, margin and activation norm. They do not use the supervised
+regression's 84-dimensional feature vector, its coefficients or its
+thresholds. Thus their comparison with the supervised detector concerns
+different information settings and representations, rather than an
+aggregation-only ablation.
+
+\subsubsection{MMD on historical descriptors}
+\label{subsubsec:methods-mmd}
+
+The baseline measures a discrepancy between an incoming descriptor sample
+and a pooled historical reference bank. Maximum mean discrepancy compares
+distributions through kernel mean embeddings~\cite{gretton2012mmd}.
+Here the kernel is approximated with random Fourier
+features~\cite{rahimi2007random}, keeping repeated dataset tests inexpensive.
+
+Historical rows are split into a preprocessing-fit subset and a disjoint
+test bank. The fit subset alone determines the transformation: gradient and
+activation norms receive a $\log(1+x)$ transform, coordinates are centred
+by their medians and scaled by $1.4826$ times their median absolute
+deviations, and near-zero-scale coordinates are removed. Standardised
+values are clipped to $[-12,12]$. The RBF bandwidth is the median nonzero
+pairwise distance in this transformed fit subset. No incoming values are
+used to select these settings.
+
+For transformed descriptor $d$, the random map is
+\begin{equation}
+    \psi(d)=\sqrt{\frac{2}{D}}
+       \bigl(\cos(\omega_1^\top d+b_1),\ldots,
+             \cos(\omega_D^\top d+b_D)\bigr),
+    \label{eq:methods-rff}
+\end{equation}
+where $\omega_j\sim\mathcal{N}(0,\ell^{-2}I)$ and
+$b_j\sim\operatorname{Unif}(0,2\pi)$ are fixed after fitting. The statistic
+is the biased squared distance between the two feature means,
+\begin{equation}
+    T_{\mathrm{MMD}}=
+    \left\|\frac{1}{n_R}\sum_{i=1}^{n_R}\psi(d_i^R)
+          -\frac{1}{n_B}\sum_{i=1}^{n_B}\psi(d_i^B)\right\|_2^2.
+    \label{eq:methods-mmd}
+\end{equation}
+Group assignments are permuted while preserving group sizes and the frozen
+feature map. With $P$ random permutations, the Monte Carlo value is
+$(1+\#\{T^{(b)}\geq T_{\mathrm{MMD}}\})/(P+1)$; numerical ties are
+counted conservatively. The null concerns equality of the represented
+distributions. Its permutation interpretation requires exchangeability,
+which is not established merely because the historical checkpoint is
+clean. Synthetic inversion data and genuine incoming images can differ
+even in the absence of an attack.
+
+\subsubsection{Rank correlations within each dataset}
+\label{subsubsec:methods-rank}
+
+Rank compares historical tasks separately rather than pooling their
+descriptors. Its aim is to discard changes in individual feature scales
+while retaining changes in pairwise dependence. For feature coordinates
+$a<b$ and a sample of $n$ rows, the implemented Kendall statistic is
+\begin{equation}
+    \widehat{\tau}_{ab}
+    =\frac{2}{n(n-1)}\sum_{i<j}
+       \operatorname{sign}(d_{ia}-d_{ja})
+       \operatorname{sign}(d_{ib}-d_{jb}).
+    \label{eq:methods-kendall}
+\end{equation}
+This is Kendall's $\tau_a$~\cite{kendall1938rank}; tied values contribute
+zero. It is not a tie-corrected $\tau_b$. Ten descriptors give 45 possible
+pairs.
+
+For each historical reference and feature pair, the correlation is also
+calculated after leaving out each row. Its jackknife pseudovalue is
+\begin{equation}
+    P_{i,ab}=n\widehat{\tau}_{ab}-(n-1)\widehat{\tau}_{ab}^{(-i)},
+    \qquad
+    Q_{i,ab}=P_{i,ab}-\overline{P}_{ab}.
+    \label{eq:methods-jackknife}
+\end{equation}
+These pseudovalues describe first-order sampling variation, not additional
+images~\cite{efron1981jackknife}. A pair is retained only if the empirical
+variance of its centred pseudovalues exceeds $10^{-12}$ in every historical
+reference. The retained set $\mathcal{A}$ is selected using historical
+data alone. This excludes effectively degenerate reference coordinates; it
+does not prove that all bootstrap assumptions hold.
+
+For incoming dataset $B$ and reference task $h$, the observed discrepancy is
+\begin{equation}
+    T_h=\max_{(a,b)\in\mathcal{A}}
+         |\widehat{\tau}_{ab}^{B}-\widehat{\tau}_{ab}^{h}|.
+    \label{eq:methods-rank-statistic}
+\end{equation}
+A Gaussian multiplier construction approximates its null variation. For
+each draw, independent standard-normal row weights are applied to centred
+pseudovalues. For a sample of size $n$, the implemented scaling is
+\begin{equation}
+    G_{ab}^{(b)}=
+       \frac{1}{\sqrt{n(n-1)}}\sum_{i=1}^{n}\xi_i^{(b)}Q_{i,ab},
+       \qquad \xi_i^{(b)}\sim\mathcal{N}(0,1).
+    \label{eq:methods-multiplier}
+\end{equation}
+The same row weight is shared across feature pairs within a sample, so
+their dependence is retained. Incoming and reference weights are generated
+separately. The simulated statistic and approximate comparison value are
+\begin{align}
+    T_h^{(b)}&=\max_{(a,c)\in\mathcal{A}}
+        |G_{ac}^{B,(b)}-G_{ac}^{h,(b)}|,\\
+    \widehat{p}_h&=
+        \frac{1+\sum_{b=1}^{B_0}\mathbf{1}\{T_h^{(b)}\geq T_h\}}
+             {B_0+1}.
+    \label{eq:methods-rank-pvalue}
+\end{align}
+There are $B_0=499$ draws, giving a Monte Carlo resolution of $1/500$.
+Numerically tied statistics are counted conservatively.
+This construction is motivated by Gaussian and jackknife-bootstrap
+approximations for nondegenerate high-dimensional
+$U$-statistics~\cite{chen2018bootstrap}. Its use here is an experimental
+two-sample procedure, not an exact permutation test or a proved
+finite-sample poisoning detector.
+
+Rank accepts compatibility with any historical reference. Equivalently,
+its null is the union of the taskwise compatibility hypotheses. The dataset
+alerts only when every taskwise comparison rejects:
+\begin{equation}
+    \widehat{p}_{\mathrm{union}}=\max_h\widehat{p}_h,
+    \qquad
+    A_{\mathrm{Rank}}(B)=
+       \mathbf{1}\{\widehat{p}_{\mathrm{union}}\leq 0.05\}.
+    \label{eq:methods-rank-union}
+\end{equation}
+This is not a vote over image classifications. Increasing the number of
+historical references gives the incoming data more opportunities to match
+a reference, which can reduce sensitivity.
+
+Strictly increasing transformations of individual coordinates leave these
+rank correlations unchanged. Rank can therefore miss an attack that alters
+only marginal magnitudes. It can also miss higher-order dependence changes
+that preserve pairwise correlations. If a retained descriptor becomes
+constant in an incoming bag, the implementation reports an unsupported
+comparison rather than treating it as evidence that the bag is clean.
+Reference fidelity, ties and dependence between inversion samples further
+limit the interpretation of the approximate values.
+
+\subsection{What the Decisions Establish}
+\label{subsec:methods-interpretation}
+
+For the supervised method, the fitted representation, scaler, regression,
+sample cutoff and count cutoff are all frozen before target evaluation.
+Target clean/poison labels are used only to construct the controlled
+mixtures and calculate metrics. Reference-based fitting likewise precedes
+reading the incoming benchmark, and its predictors receive descriptor
+columns rather than attack labels or class labels.
+
+An alert has different meanings in the two settings: source-learned
+poisoning evidence for logistic regression, and historical distribution
+incompatibility for MMD or Rank. None certifies the cause of a discrepancy.
+Conversely, a non-alert does not establish that learning the dataset is
+safe. Determining whether filtering by these decisions prevents forgetting
+would require a further intervention experiment, which is outside the
+evaluation described in the next section.
